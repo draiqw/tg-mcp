@@ -1,0 +1,13 @@
+# Secrets and state stay out of the image — they are mounted as a volume
+.env
+data/
+*.session
+*.session-journal
+
+.venv/
+__pycache__/
+*.py[cod]
+.git/
+.DS_Store
+docs/
+*.plist

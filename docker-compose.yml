@@ -1,0 +1,30 @@
+services:
+  tgagent:
+    build: .
+    image: tgagent:latest
+    container_name: tgagent
+    restart: unless-stopped
+
+    # .env is read by docker compose and passed to the process as environment
+    # variables. The file itself is not copied into the image (see .dockerignore).
+    env_file: .env
+
+    # All state lives on the host, in ./data: session, rules, logs, downloads.
+    # A local run via uv uses the same directory, so a sign-in made without
+    # docker keeps working inside the container.
+    volumes:
+      - ./data:/data
+
+    # The container runs as root so it can read the mode-600 session files
+    # created by your user on the host. If you do not need that — set
+    # user: "1000:1000" and run chown -R 1000:1000 ./data.
+
+    # One process, nothing listening outwards: MCP talks to it through
+    # docker exec, ports are deliberately not published.
+    stop_grace_period: 20s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
