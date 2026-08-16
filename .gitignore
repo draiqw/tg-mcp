@@ -1,0 +1,16 @@
+# Secrets and account access — never in git
+.env
+data/
+*.session
+*.session-journal
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
