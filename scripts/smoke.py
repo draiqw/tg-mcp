@@ -70,6 +70,7 @@ async def main() -> int:
             ("media", {"chat": probe, "kind": "photo", "limit": 3}),
             ("media", {"chat": probe, "kind": "link", "limit": 3}),
             ("media", {"chat": probe, "kind": "voice", "limit": 3}),
+            ("activity", {"since": "today", "limit_chats": 5}),
             ("saved_tags", {}),
             ("stories", {}),
             ("sessions", {}),

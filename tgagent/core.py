@@ -277,6 +277,17 @@ def _preview_thumb(msg, max_width: int = 1280) -> tuple[int, str | None]:
     return best, f"{getattr(s, 'w', '?')}x{getattr(s, 'h', '?')}"
 
 
+def _day_start() -> datetime:
+    """The start of today in local time, but expressed in UTC.
+
+    "Today" for a person is their own midnight, not midnight in Greenwich.
+    """
+    local_midnight = datetime.now().astimezone().replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return local_midnight.astimezone(timezone.utc)
+
+
 def _parse_when(when: Any) -> datetime:
     """ISO time, unix seconds or a relative '+30m' / '+2h' / '+3d'."""
     if isinstance(when, (int, float)):
@@ -423,6 +434,25 @@ class TelegramService:
         if not out["text"] and out["media"]:
             out["text"] = f"[{out['media']}]"
         return {k: v for k, v in out.items() if v not in (None, False, "")} | {"id": msg.id}
+
+    def message_link(self, msg, ent=None) -> str | None:
+        """A link to the message itself — the one that opens in a Telegram client."""
+        chat = ent if ent is not None else getattr(msg, "chat", None)
+        # A message link exists only in channels and supergroups. A person has an
+        # @username too, but t.me/username/123 leads elsewhere: in a DM there is
+        # no message link at all.
+        if not (getattr(chat, "broadcast", False) or getattr(chat, "megagroup", False)):
+            return None
+        username = getattr(chat, "username", None)
+        if username:
+            return f"https://t.me/{username}/{msg.id}"
+        try:
+            cid = utils.get_peer_id(chat) if chat is not None else None
+        except Exception:
+            cid = None
+        if cid is not None and str(cid).startswith("-100"):
+            return f"https://t.me/c/{str(cid)[4:]}/{msg.id}"
+        return None  # in a DM and a plain group no message link exists
 
     # ---------- read operations ----------
 
@@ -1236,23 +1266,182 @@ class TelegramService:
             ],
         }
 
-    async def export(
-        self, chat: Any, limit: int = 1000, format: str = "json", dest: str | None = None
+    async def activity(
+        self,
+        since: str = "today",
+        until: str | None = None,
+        limit_chats: int = 100,
+        kind: str | None = None,
+        include_own: bool = True,
+        per_chat: int = 0,
     ) -> dict:
-        """Export a conversation to a file: json to parse, markdown/text to read."""
+        """Where any conversation happened over a period: today, over a day, over
+        any stretch.
+
+        Answers "which chats did I talk in today" — unlike `unread`, chats that
+        were read get in here too, and so do those where only you wrote.
+        """
+        start = _day_start() if str(since).lower() in ("today", "сегодня") else _parse_when(since)
+        end = _parse_when(until) if until else None
+        rows: list[dict] = []
+        scanned = 0
+        async for d in self.client.iter_dialogs(limit=400, archived=None):
+            scanned += 1
+            last = getattr(d, "date", None)
+            if last is None or last < start:
+                # Dialogs come in descending order of the last message date, but
+                # pinned ones float to the top regardless of it — hence continue,
+                # not break.
+                continue
+            if end and last > end:
+                continue
+            if kind and self.dialog_kind(d) != kind:
+                continue
+            incoming = outgoing = 0
+            first_at = None
+            sample: list[dict] = []
+            async for m in self.client.iter_messages(d.entity, limit=300):
+                if m.date < start:
+                    break
+                if end and m.date > end:
+                    continue
+                if m.out:
+                    outgoing += 1
+                else:
+                    incoming += 1
+                first_at = m.date
+                if per_chat and len(sample) < per_chat:
+                    sample.append(self.message_dict(m))
+            if not (incoming or outgoing):
+                continue
+            if not include_own and not incoming:
+                continue
+            row = {
+                "id": d.id,
+                "chat": d.name,
+                "type": self.dialog_kind(d),
+                "archived": bool(d.archived),
+                "messages": incoming + outgoing,
+                "incoming": incoming,
+                "outgoing": outgoing,
+                "unread": d.unread_count,
+                "first_at": _iso(first_at),
+                "last_at": _iso(last),
+            }
+            if sample:
+                row["sample"] = list(reversed(sample))
+            rows.append(row)
+            if len(rows) >= limit_chats:
+                break
+        rows.sort(key=lambda r: r["last_at"] or "", reverse=True)
+        return {
+            "since": _iso(start),
+            "until": _iso(end) if end else None,
+            "chats": len(rows),
+            "messages": sum(r["messages"] for r in rows),
+            "incoming": sum(r["incoming"] for r in rows),
+            "outgoing": sum(r["outgoing"] for r in rows),
+            "scanned_dialogs": scanned,
+            "items": rows,
+        }
+
+    async def export(
+        self,
+        chat: Any = None,
+        limit: int = 1000,
+        format: str = "json",
+        dest: str | None = None,
+        chats: list | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        media: bool = False,
+        media_max_mb: int = 50,
+    ) -> dict:
+        """Export a conversation to a file: json to parse, markdown/text to read.
+
+        `chats` exports several chats at once, `since="today"` only a period,
+        `media=True` additionally downloads attachments and puts the file path
+        and a link to the message itself into every message.
+        """
         if format not in ("json", "markdown", "text"):
             raise ValueError("format: json, markdown or text")
+        if chats:
+            targets = list(chats)
+            if len(targets) > 25:
+                raise ValueError("no more than 25 chats at a time")
+            out = []
+            for one in targets:
+                try:
+                    out.append(
+                        await self.export(
+                            chat=one, limit=limit, format=format, dest=dest,
+                            since=since, until=until, media=media,
+                            media_max_mb=media_max_mb,
+                        )
+                    )
+                except Exception as exc:
+                    out.append({"chat": str(one), "error": f"{type(exc).__name__}: {exc}"})
+            return {
+                "chats": len(out),
+                "messages": sum(r.get("messages", 0) for r in out if isinstance(r, dict)),
+                "files": sum(r.get("files", 0) for r in out if isinstance(r, dict)),
+                "items": out,
+            }
+        if chat is None:
+            raise ValueError("chat or chats is required")
+
         limit = max(1, min(int(limit), 5000))
+        start = None
+        if since:
+            start = _day_start() if str(since).lower() in ("today", "сегодня") else _parse_when(since)
+        end = _parse_when(until) if until else None
         ent = await self.resolve(chat)
-        name = "Saved Messages" if ent == "me" else entity_name(await self.client.get_entity(ent))
-        rows = []
-        async for m in self.client.iter_messages(ent, limit=limit):
-            rows.append(self.message_dict(m))
-        rows.reverse()  # chronological order reads better
+        entity = None if ent == "me" else await self.client.get_entity(ent)
+        name = "Saved Messages" if ent == "me" else entity_name(entity)
 
         target = Path(dest).expanduser() if dest else config.DOWNLOADS
         target.mkdir(parents=True, exist_ok=True)
         safe = "".join(c for c in name if c.isalnum() or c in " -_").strip()[:60] or "chat"
+        media_dir = target / f"{safe} media"
+
+        rows = []
+        files = 0
+        skipped: list[dict] = []
+        async for m in self.client.iter_messages(ent, limit=limit):
+            if start and m.date < start:
+                break
+            if end and m.date > end:
+                continue
+            row = self.message_dict(m)
+            link = self.message_link(m, entity)
+            if link:
+                row["link"] = link
+            if m.media is not None:
+                f = m.file
+                info = {
+                    "kind": _media_kind(m),
+                    "name": getattr(f, "name", None),
+                    "size": getattr(f, "size", None),
+                    "mime": getattr(f, "mime_type", None),
+                }
+                if media:
+                    size_mb = (getattr(f, "size", 0) or 0) / (1024 * 1024)
+                    if size_mb > media_max_mb:
+                        info["skipped"] = f"larger than {media_max_mb} MB"
+                        skipped.append({"message_id": m.id, "size_mb": round(size_mb, 1)})
+                    else:
+                        media_dir.mkdir(parents=True, exist_ok=True)
+                        try:
+                            path = await self.client.download_media(m, file=str(media_dir))
+                            if path:
+                                info["path"] = str(path)
+                                files += 1
+                        except Exception as exc:
+                            info["download_error"] = f"{type(exc).__name__}: {exc}"
+                row["file"] = {k: v for k, v in info.items() if v is not None}
+            rows.append(row)
+        rows.reverse()  # chronological order reads better
+
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         ext = {"json": "json", "markdown": "md", "text": "txt"}[format]
         path = target / f"{safe} {stamp}.{ext}"
@@ -1260,7 +1449,8 @@ class TelegramService:
         if format == "json":
             body = json.dumps(
                 {"chat": name, "exported_at": _iso(datetime.now(timezone.utc)),
-                 "count": len(rows), "messages": rows},
+                 "since": _iso(start) if start else None,
+                 "count": len(rows), "files": files, "messages": rows},
                 ensure_ascii=False, indent=2,
             )
         else:
@@ -1269,19 +1459,34 @@ class TelegramService:
                 who = r.get("from") or "?"
                 stamp_line = (r.get("date") or "")[:16].replace("T", " ")
                 text = r.get("text", "")
+                extra = []
+                f_info = r.get("file") or {}
+                if f_info.get("path"):
+                    extra.append(f"file: {f_info['path']}")
+                elif f_info:
+                    extra.append(f"attachment: {f_info.get('kind')}")
+                for url in r.get("links") or []:
+                    extra.append(f"link: {url}")
+                if r.get("link"):
+                    extra.append(r["link"])
+                tail = ("\n" + "\n".join(extra)) if extra else ""
                 lines.append(
-                    f"**{who}** · {stamp_line}\n{text}\n" if format == "markdown"
-                    else f"[{stamp_line}] {who}: {text}"
+                    f"**{who}** · {stamp_line}\n{text}{tail}\n" if format == "markdown"
+                    else f"[{stamp_line}] {who}: {text}{tail}"
                 )
             body = "\n".join(lines)
         path.write_text(body, encoding="utf-8")
-        return {
+        out = {
             "path": str(path),
             "chat": name,
             "messages": len(rows),
+            "files": files,
+            "media_dir": str(media_dir) if files else None,
+            "skipped_large": skipped or None,
             "bytes": path.stat().st_size,
             "format": format,
         }
+        return {k: v for k, v in out.items() if v is not None}
 
     # ---------- looking at media and listening to it ----------
 

@@ -529,17 +529,38 @@ async def tg_scheduled(chat: str, limit: int = 30, cancel_ids: list[int] | None 
 
 @mcp.tool()
 async def tg_export(
-    chat: str, limit: int = 1000, format: str = "json", dest: str | None = None
+    chat: str | None = None,
+    limit: int = 1000,
+    format: str = "json",
+    dest: str | None = None,
+    chats: list[str] | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    media: bool = False,
+    media_max_mb: int = 50,
 ) -> str:
-    """Dump a conversation to a file (max 5000 messages).
+    """Dump whole conversations to files (max 5000 messages per chat).
+
+    With media=true every attachment is downloaded next to the transcript and
+    each message carries the local file path, its links, and a t.me link to the
+    message itself where one exists. That is the tool for "give me the full
+    conversation with everything in it", and it pairs with tg_activity: take
+    the chat ids from there, feed them in as `chats`.
 
     Args:
-        chat: chat to export.
-        limit: how many recent messages, oldest first in the file.
+        chat: one chat to export.
+        chats: several chats at once, up to 25. One failure does not stop the rest.
+        limit: how many recent messages per chat, written oldest first.
         format: json for analysis, markdown or text for reading.
         dest: target directory. Defaults to tg-agent/data/downloads.
+        since: only messages from this point — "today" or an ISO datetime.
+        until: upper bound, ISO datetime.
+        media: also download every attachment.
+        media_max_mb: skip attachments larger than this (they are listed as skipped).
     """
-    return j(await call("export", chat=chat, limit=limit, format=format, dest=dest))
+    return j(await call("export", chat=chat, limit=limit, format=format, dest=dest,
+                        chats=chats, since=since, until=until, media=media,
+                        media_max_mb=media_max_mb))
 
 
 @mcp.tool()
@@ -959,6 +980,34 @@ async def tg_rules(patch: dict) -> str:
     Call tg_status first to see current values; this merges on top of them.
     """
     return j(await call("rules", patch=patch))
+
+
+@mcp.tool()
+async def tg_activity(
+    since: str = "today",
+    until: str | None = None,
+    limit_chats: int = 100,
+    kind: str | None = None,
+    include_own: bool = True,
+    per_chat: int = 0,
+) -> str:
+    """Which chats had any conversation in a period — "where did I talk today".
+
+    Unlike tg_unread this covers chats that are already read and chats where
+    only the owner wrote, so it is the right starting point for a daily recap.
+    Counts incoming and outgoing separately and scans the archive too.
+
+    Args:
+        since: "today" (default, local midnight), an ISO datetime, or a relative
+               offset like "-6h".
+        until: upper bound, ISO datetime; omit for "up to now".
+        limit_chats: cap on chats returned.
+        kind: keep one type only — "user", "bot", "group", "channel".
+        include_own: false drops chats where nobody but the owner wrote.
+        per_chat: also include this many messages from each chat as a sample.
+    """
+    return j(await call("activity", since=since, until=until, limit_chats=limit_chats,
+                        kind=kind, include_own=include_own, per_chat=per_chat))
 
 
 @mcp.tool()

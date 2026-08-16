@@ -1,7 +1,7 @@
 ---
 name: telegram-watch
 description: A cheap Telegram watcher on Haiku. Checks the unread, mentions and watcher events, reports briefly and warns the owner through the bot when needed. Use for regular "what is new" checks, triaging the inbox and background digests, when sending messages to people is not needed.
-tools: mcp__telegram__tg_status, mcp__telegram__tg_structure, mcp__telegram__tg_folders, mcp__telegram__tg_dialogs, mcp__telegram__tg_unread, mcp__telegram__tg_history, mcp__telegram__tg_history_batch, mcp__telegram__tg_message, mcp__telegram__tg_search, mcp__telegram__tg_mentions, mcp__telegram__tg_chat_info, mcp__telegram__tg_participants, mcp__telegram__tg_contacts, mcp__telegram__tg_common_chats, mcp__telegram__tg_resolve, mcp__telegram__tg_saved_tags, mcp__telegram__tg_stories, mcp__telegram__tg_summarize, mcp__telegram__tg_view, mcp__telegram__tg_transcribe, mcp__telegram__tg_translate, mcp__telegram__tg_media, mcp__telegram__tg_download, mcp__telegram__tg_download_many, mcp__telegram__tg_events, mcp__telegram__tg_drafts, mcp__telegram__tg_scheduled, mcp__telegram__tg_topics, mcp__telegram__tg_accounts, mcp__telegram__tg_alert, mcp__telegram__tg_mark_read, mcp__telegram__tg_mute, mcp__telegram__tg_archive, mcp__telegram__tg_send
+tools: mcp__telegram__tg_status, mcp__telegram__tg_structure, mcp__telegram__tg_folders, mcp__telegram__tg_dialogs, mcp__telegram__tg_unread, mcp__telegram__tg_activity, mcp__telegram__tg_history, mcp__telegram__tg_history_batch, mcp__telegram__tg_message, mcp__telegram__tg_search, mcp__telegram__tg_mentions, mcp__telegram__tg_chat_info, mcp__telegram__tg_participants, mcp__telegram__tg_contacts, mcp__telegram__tg_common_chats, mcp__telegram__tg_resolve, mcp__telegram__tg_saved_tags, mcp__telegram__tg_stories, mcp__telegram__tg_summarize, mcp__telegram__tg_view, mcp__telegram__tg_transcribe, mcp__telegram__tg_translate, mcp__telegram__tg_media, mcp__telegram__tg_download, mcp__telegram__tg_download_many, mcp__telegram__tg_events, mcp__telegram__tg_drafts, mcp__telegram__tg_scheduled, mcp__telegram__tg_topics, mcp__telegram__tg_accounts, mcp__telegram__tg_alert, mcp__telegram__tg_mark_read, mcp__telegram__tg_mute, mcp__telegram__tg_archive, mcp__telegram__tg_send
 model: haiku
 ---
 
@@ -10,7 +10,8 @@ and report briefly. You do not carry on conversations.
 
 ## What to do
 
-1. `tg_unread` — a digest of the unread across all chats. `tg_mentions` — where you were called.
+1. `tg_unread` — a digest of the unread across all chats. `tg_activity` — where a conversation
+   went on at all today, including what has already been read. `tg_mentions` — where you were called.
    `tg_events` — what the background watcher caught since last time.
    Questions about how the account is arranged (folders, groups, archive, how much of what) — one call
    to `tg_structure`. Several chats in a row — `tg_history_batch`, not a loop.

@@ -1,6 +1,6 @@
 # MCP tools
 
-69 tools. Each one is a thin wrapper over a core method; all the logic is in
+70 tools. Each one is a thin wrapper over a core method; all the logic is in
 `tgagent/core.py`.
 
 ## Accounts
@@ -100,10 +100,41 @@ Every unsent draft on the account, with the chats they are attached to.
 A chat's scheduled messages. With `cancel_ids` it cancels them instead of showing
 them.
 
-### `tg_export(chat, limit=1000, format="json", dest=None)`
-Export of a correspondence to a file, up to 5000 messages, in chronological
-order. `json` is for parsing, `markdown` and `text` for reading. Returns the path
-and the size.
+### `tg_activity(since="today", until=None, limit_chats=100, kind=None, include_own=True, per_chat=0)`
+Where the correspondence actually went on over a period. Unlike `tg_unread`, the
+chats that are already read and the ones where only you wrote land here too —
+which is why this is the right start for a digest of the day.
+
+Per chat: how many messages in all, how many incoming and outgoing, the time of
+the first and of the last, whether it is archived. `since` understands `today`
+(midnight in your local time, not in Greenwich), an ISO date and an offset of the
+form `-6h`. `per_chat` adds sample messages.
+
+It looks at the archive as well: on a live account that comes to 52 chats and
+1672 messages a day out of 320 dialogs examined.
+
+### `tg_export(chat=None, chats=None, limit=1000, format="json", dest=None, since=None, until=None, media=False, media_max_mb=50)`
+Export of a correspondence to a file, up to 5000 messages per chat, in
+chronological order. `json` is for parsing, `markdown` and `text` for reading.
+
+`chats` exports up to 25 chats at a time, and an error in one does not bring down
+the rest. `since="today"` limits the period. `media=true` downloads every
+attachment into a folder next to the transcript, and then every message gains:
+
+- `file` — the path on disk, the name, the size, the mime type and the
+  attachment type;
+- `links` — the links from the text, including the ones hidden behind the
+  caption;
+- `link` — a link to the message itself. It exists only in channels and
+  supergroups: in a private conversation Telegram has no message link at all, and
+  substituting `t.me/username/id` there is not allowed — it leads somewhere else.
+
+Files larger than `media_max_mb` are not downloaded but listed in
+`skipped_large`.
+
+The pairing with `tg_activity` is what closes "give me all of today's
+conversations in full": first the list of chats for the day, then their ids as a
+list in `chats`.
 
 ## Links
 
@@ -422,7 +453,7 @@ the values are in [configuration.md](configuration.md#alert-rules).
 
 ## What is deliberately missing
 
-The MTProto map (layer 227) is wider than these 69 tools, and part of it is
+The MTProto map (layer 227) is wider than these 70 tools, and part of it is
 deliberately not taken — that is a decision, not a gap:
 
 | What | Why not |

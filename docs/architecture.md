@@ -7,9 +7,9 @@ the code talks to Telegram. Everything else is transport and scaffolding:
 
 | File | Lines | Role |
 |---|---|---|
-| **`tgagent/core.py`** | 2956 | **core: all account operations, chat resolution, limits** |
-| `tgagent/daemon.py` | 722 | owner of all sessions, RPC over a unix socket, watcher, waiting, bot channel |
-| `tgagent/mcp_server.py` | 1114 | 69 tools, each one a single call to the daemon |
+| **`tgagent/core.py`** | 3161 | **core: all account operations, chat resolution, limits** |
+| `tgagent/daemon.py` | 723 | owner of all sessions, RPC over a unix socket, watcher, waiting, bot channel |
+| `tgagent/mcp_server.py` | 1163 | 70 tools, each one a single call to the daemon |
 | `tgagent/cli.py` | 517 | setup, sign-in, daemon control |
 | `tgagent/config.py` | 174 | paths, `.env`, rules, limits |
 | `tgagent/alerts.py` | 111 | Bot API: alerts, commands, buttons under the agent's questions |

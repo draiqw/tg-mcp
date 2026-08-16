@@ -563,6 +563,7 @@ class Daemon:
             "drafts": t.drafts,
             "scheduled": t.scheduled,
             "export": t.export,
+            "activity": t.activity,
             "click": t.click,
             "send": t.send,
             "send_file": t.send_file,
