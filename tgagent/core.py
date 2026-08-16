@@ -232,6 +232,19 @@ def _reactions(msg) -> list[dict] | None:
     return rows or None
 
 
+def reaction_of(obj) -> str | None:
+    """The reaction emoji; for custom ones the document id instead."""
+    return getattr(obj, "emoticon", None) or getattr(obj, "document_id", None)
+
+
+def _input_reaction(value: Any):
+    """A plain emoji or a custom emoji id (Premium) — into a reaction object."""
+    text = str(value)
+    if text.isdigit():
+        return types.ReactionCustomEmoji(document_id=int(text))
+    return types.ReactionEmoji(emoticon=text)
+
+
 def _buttons(msg) -> list[dict] | None:
     """Buttons under a bot message, with the coordinates for pressing them."""
     try:
@@ -1076,6 +1089,28 @@ class TelegramService:
             out["read_by"] = len(res)
         except Exception:
             pass  # available only in small groups and for the first days — normal
+
+        if out.get("reactions"):
+            # Who exactly reacted. In large channels Telegram does not hand out
+            # the list (can_see_list), so only the counters remain.
+            try:
+                res = await self.client(
+                    functions.messages.GetMessageReactionsListRequest(
+                        peer=peer, id=mid, limit=30
+                    )
+                )
+                names = {utils.get_peer_id(u): entity_name(u)
+                         for u in list(res.users) + list(getattr(res, "chats", []))}
+                out["reacted_by"] = [
+                    {
+                        "who": names.get(utils.get_peer_id(r.peer_id)),
+                        "emoji": reaction_of(r.reaction),
+                        "at": _iso(r.date),
+                    }
+                    for r in res.reactions
+                ]
+            except Exception:
+                pass
 
         if getattr(msg, "out", False):
             # Whether the peer read my message. Works only in a DM, only on
@@ -2280,22 +2315,59 @@ class TelegramService:
         }
 
     async def react(
-        self, chat: Any, message_id: int, emoji: str | None = None, big: bool = False
+        self, chat: Any, message_id: int, emoji: Any = None, big: bool = False
     ) -> dict:
-        """Put a reaction; without emoji it removes your own."""
+        """Put a reaction; without emoji it removes your own.
+
+        `emoji` is either the character itself, or a custom emoji id (Premium), or
+        a list: Telegram Premium allows several reactions on one message.
+        """
         self._assert_write()
         ent = await self.resolve(chat)
         peer = await self.client.get_input_entity(ent)
-        await self.client(
-            functions.messages.SendReactionRequest(
-                peer=peer,
-                msg_id=int(message_id),
-                reaction=[types.ReactionEmoji(emoticon=emoji)] if emoji else [],
-                big=big,
-                add_to_recent=True,
+        wanted = [] if emoji is None else (emoji if isinstance(emoji, list) else [emoji])
+        if len(wanted) > 3:
+            raise ValueError("Telegram allows no more than three reactions on a message")
+        try:
+            await self.client(
+                functions.messages.SendReactionRequest(
+                    peer=peer,
+                    msg_id=int(message_id),
+                    reaction=[_input_reaction(e) for e in wanted],
+                    big=big,
+                    add_to_recent=True,
+                )
             )
-        )
-        return {"message_id": int(message_id), "reaction": emoji, "removed": emoji is None}
+        except Exception as exc:
+            if "REACTION_INVALID" in str(exc):
+                allowed = await self.reactions_allowed(chat)
+                raise ValueError(
+                    f"such a reaction cannot be put here. Allowed: {allowed}"
+                ) from exc
+            raise
+        return {
+            "message_id": int(message_id),
+            "reaction": wanted or None,
+            "removed": not wanted,
+        }
+
+    async def reactions_allowed(self, chat: Any) -> str:
+        """Which reactions this chat allows — for a comprehensible error."""
+        try:
+            ent = await self.resolve(chat)
+            full = await self.client(
+                functions.channels.GetFullChannelRequest(await self.client.get_entity(ent))
+            )
+            av = getattr(full.full_chat, "available_reactions", None)
+            if isinstance(av, types.ChatReactionsAll):
+                return "any"
+            if isinstance(av, types.ChatReactionsSome):
+                return ", ".join(str(reaction_of(r)) for r in av.reactions) or "none"
+            if isinstance(av, types.ChatReactionsNone):
+                return "none, reactions are switched off in this chat"
+        except Exception:
+            pass
+        return "unknown"
 
     async def pin_message(
         self, chat: Any, message_id: int, unpin: bool = False, notify: bool = False

@@ -22,9 +22,11 @@ from typing import Any
 
 from aiohttp import web
 from telethon import events, utils
+from telethon.tl import types
 
 from . import alerts, config
 from .core import GuardError, TelegramService, entity_name
+from .core import reaction_of as core_reaction_of
 
 MAX_EVENT_LOG_BYTES = 20 * 1024 * 1024
 
@@ -329,6 +331,70 @@ class Daemon:
             if self.resolve_question(qid, text, "text"):
                 return True
         return False
+
+    async def on_reaction(self, update, account: str = config.MAIN_ACCOUNT) -> None:
+        """Someone added or removed a reaction.
+
+        It comes as a separate raw update: a reaction is not a new message, so the
+        ordinary watcher does not see it. Only reactions to our own messages are
+        interesting — for other people's, Telegram sends them in batches in every
+        chat.
+
+        Our own reaction never gets here: Telegram sends no update for actions of
+        this same session, just as it sends none for our own sent messages.
+        """
+        svc = self.services.get(account)
+        if svc is None:
+            return
+        try:
+            ent = await svc.client.get_entity(update.peer)
+            msg = await svc.client.get_messages(ent, ids=update.msg_id)
+            if msg is None or not msg.out:
+                return
+            recent = getattr(update.reactions, "recent_reactions", None) or []
+            who, emoji = None, None
+            for r in recent:
+                if getattr(r, "my", False):
+                    continue   # we do not show our own reaction back to ourselves
+                emoji = core_reaction_of(r.reaction)
+                try:
+                    who = entity_name(await svc.client.get_entity(r.peer_id))
+                except Exception:
+                    who = None
+                break
+            counts = [
+                {"emoji": core_reaction_of(i.reaction), "count": i.count}
+                for i in getattr(update.reactions, "results", [])
+            ]
+            if not counts:
+                return   # the reaction was removed, not added
+            chat_id = utils.get_peer_id(ent)
+            ev = {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "account": account,
+                "kind": "reaction",
+                "chat": entity_name(ent),
+                "chat_id": chat_id,
+                "private": isinstance(ent, types.User),
+                "from": who,
+                "message_id": update.msg_id,
+                "text": (msg.message or "")[:200],
+                "emoji": emoji,
+                "reactions": counts,
+                "link": svc.message_link(msg, ent),
+            }
+            log(f"reaction: {ev['chat']} #{update.msg_id} {emoji} from {who or '?'}")
+            self.feed_waiters(ev)
+            self.append_event(ev)
+            if (
+                self.rules.get("alert_on_reaction")
+                and not self.paused
+                and self.bot.configured
+            ):
+                await self.bot.send(alerts.format_reaction(ev))
+                self.alert_count += 1
+        except Exception:
+            log("reaction watcher error:\n" + traceback.format_exc())
 
     async def on_own_message(self, event, account: str = config.MAIN_ACCOUNT) -> None:
         """Our own sent message: only for tg_wait(include_own=true)."""
@@ -647,6 +713,14 @@ class Daemon:
             svc.client.add_event_handler(
                 lambda event, _label=label: self.on_own_message(event, _label),
                 events.NewMessage(outgoing=True, incoming=False),
+            )
+            # A reaction is not a message, it does not arrive as an ordinary event.
+            # An events.Raw handler receives the update itself, not a wrapping event:
+            # expecting event.original_update here means silently catching an
+            # AttributeError inside Telethon and seeing no reaction at all.
+            svc.client.add_event_handler(
+                lambda update, _label=label: self.on_reaction(update, _label),
+                events.Raw(types.UpdateMessageReactions),
             )
 
         app = web.Application()

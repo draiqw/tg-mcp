@@ -7,12 +7,12 @@ the code talks to Telegram. Everything else is transport and scaffolding:
 
 | File | Lines | Role |
 |---|---|---|
-| **`tgagent/core.py`** | 3161 | **core: all account operations, chat resolution, limits** |
-| `tgagent/daemon.py` | 723 | owner of all sessions, RPC over a unix socket, watcher, waiting, bot channel |
+| **`tgagent/core.py`** | 3233 | **core: all account operations, chat resolution, limits** |
+| `tgagent/daemon.py` | 797 | owner of all sessions, RPC over a unix socket, watcher, waiting, bot channel |
 | `tgagent/mcp_server.py` | 1163 | 70 tools, each one a single call to the daemon |
 | `tgagent/cli.py` | 517 | setup, sign-in, daemon control |
-| `tgagent/config.py` | 174 | paths, `.env`, rules, limits |
-| `tgagent/alerts.py` | 111 | Bot API: alerts, commands, buttons under the agent's questions |
+| `tgagent/config.py` | 175 | paths, `.env`, rules, limits |
+| `tgagent/alerts.py` | 125 | Bot API: alerts, commands, buttons under the agent's questions |
 
 The rule is simple: a new capability goes into `core.py` as a `TelegramService`
 method, gets registered in the daemon's `dispatch_table()` and is wrapped by a

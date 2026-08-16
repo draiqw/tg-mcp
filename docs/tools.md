@@ -93,6 +93,12 @@ it, plus `context` neighbouring messages before and after and `replies` answers
 from the thread. Telegram gives the read counter only in small groups and only
 for the first few days — if there is none, the field is simply absent.
 
+Reactions arrive in two fields: `reactions` — a summary of the form
+`[{"emoji": "🔥", "count": 1, "mine": true}]`, and `reacted_by` — **who exactly**
+put it and when. Telegram does not give the by-name list everywhere: in large
+channels it is closed and only the counters remain. For your own messages there
+is also `read_at` — whether the other person has read it.
+
 ### `tg_drafts()`
 Every unsent draft on the account, with the chats they are attached to.
 
@@ -327,7 +333,7 @@ switch) and `RateGuard`, and every call is written to `data/actions.jsonl`.
 | `tg_schedule(chat, text, when, reply_to=None)` | send later: `+30m`, `+2h`, `2026-08-17T09:00` |
 | `tg_draft(chat, text=None, reply_to=None, clear=False)` | a draft instead of a send |
 | `tg_poll(chat, question, options, multiple=False, quiz_answer=None, anonymous=True)` | a poll or a quiz, 2–10 options |
-| `tg_react(chat, message_id, emoji=None, big=False)` | a reaction; without `emoji` — remove your own |
+| `tg_react(chat, message_id, emoji=None, big=False)` | a reaction; without `emoji` — remove your own. `emoji` accepts a character, the id of a custom emoji (Premium) or a list of up to three. If the chat does not allow every reaction, the error lists the allowed ones |
 | `tg_click(chat, message_id, button=None)` | a bot's buttons: without `button` show them, with it press one |
 | `tg_edit(chat, message_id, text)` | edit something of yours already sent |
 | `tg_delete(chat, message_ids, revoke=True)` | deletion; `revoke` erases it for everyone, irreversibly |
@@ -407,6 +413,35 @@ favourites).
 The list of commands (`commands`) Telegram allows to be changed only with the
 bot's own token, so it works for this agent's bot; for the rest there is
 @BotFather.
+
+## Reactions
+
+They are visible from three sides:
+
+- **in any message read** — the `reactions` field with the summary by emoji;
+- **by name** — `tg_message` returns `reacted_by`: who put what and when. In
+  large channels Telegram closes the list, and only the counters remain there;
+- **unread ones** — `tg_mentions(kind="reactions")`: which of your messages were
+  reacted to while you have not seen it yet.
+
+**At the moment it is put**, a reaction is caught by the daemon's watcher. A
+reaction is not a new message and does not arrive as an ordinary event, so the
+daemon listens to a separate `UpdateMessageReactions` update and takes only the
+reactions to **your** messages: for other people's, Telegram sends them in
+batches across the whole chat. An event of the form
+`{"kind": "reaction", "from": "Lena", "emoji": "🔥", ...}` lands in
+`events.jsonl` (that is, it is available through `tg_events`), wakes `tg_wait`
+and, if the `alert_on_reaction` rule is turned on, arrives as an alert in the
+bot. By default the rule is off: there are usually plenty of reactions, and
+waking the phone with every little flame is not what anyone wants.
+
+Removing a reaction is not written to the log. Your own reaction will not get
+there either: for the actions of this same session Telegram sends no update — just
+as it sends none for your own sent messages.
+
+Checked on a live reaction: a person put a ❤ on the owner's message in a DM, and
+an event with the author, the emoji, the message text and the counters landed in
+`events.jsonl`.
 
 ## Notifications and folders
 

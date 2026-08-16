@@ -129,6 +129,7 @@ In docker this is not needed: there the role of autostart is played by `restart:
   "mute_chats": [],
   "ignore_bots": true,
   "transcribe_voice": true,
+  "alert_on_reaction": false,
   "min_interval_sec": 3,
   "quiet_hours": null
 }
@@ -144,6 +145,7 @@ In docker this is not needed: there the role of autostart is played by `restart:
 | `mute_chats` | an id or a piece of the title: never alert |
 | `ignore_bots` | do not wake you because of bots |
 | `transcribe_voice` | transcribe voice messages and video notes right into the alert |
+| `alert_on_reaction` | wake you with an alert when somebody reacts to your message. Off by default: reactions are always written into the log, but notifying about every little flame is too much |
 | `min_interval_sec` | throttling: no more than one alert per N seconds per chat |
 | `quiet_hours` | `[23, 8]` — stay silent from 23:00 to 08:00; `null` — round the clock |
 

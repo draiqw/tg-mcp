@@ -116,6 +116,13 @@ navigation but an action (pay, confirm, delete) — ask first.
 ## Managing chats
 
 `tg_react` — a reaction to a message, a cheap way to answer "got it" without text.
+It takes a symbol, the id of a custom emoji or a list of up to three; without `emoji` it removes
+your own. If the chat does not allow all reactions, the error lists the allowed ones.
+
+The other side is visible too: every message has `reactions`, `tg_message`
+shows `reacted_by` — who exactly set it, `tg_mentions(kind="reactions")`
+collects the unread reactions to your messages. At the moment it is set, a reaction is caught
+by the watcher: it lands in `tg_events` and wakes `tg_wait`.
 `tg_pin_message` pins a message inside a chat (`tg_pin` — the chat itself at the top of the list).
 `tg_folder_edit` works with folders as a whole: create (`create`), delete
 (`delete` — the chats stay), rename, change the icon, set

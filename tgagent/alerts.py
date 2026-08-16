@@ -79,6 +79,20 @@ class BotChannel:
             await self._session.close()
 
 
+def format_reaction(event: dict) -> str:
+    """Alert about a reaction to your message."""
+    chat = html.escape(event.get("chat") or "?")
+    who = html.escape(event.get("from") or "someone")
+    emoji = html.escape(str(event.get("emoji") or ""))
+    text = html.escape((event.get("text") or "")[:200])
+    body = f"<b>Reaction</b> {emoji} · {chat} · {who}"
+    if text:
+        body += f"\n\nto message: {text}"
+    if event.get("link"):
+        body += f'\n\n<a href="{event["link"]}">Open</a>'
+    return body
+
+
 def format_alert(event: dict, reason: str) -> str:
     """Render one Telegram event as an alert message."""
     chat = html.escape(event.get("chat") or "?")

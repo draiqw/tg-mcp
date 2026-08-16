@@ -34,6 +34,7 @@ DEFAULT_RULES = {
     "mute_chats": [],               # chat ids/titles: never alert
     "ignore_bots": True,
     "transcribe_voice": True,       # voice notes and video circles — text straight into the alert
+    "alert_on_reaction": False,     # reactions to your messages: always in the event log, in the alert — on demand
     "min_interval_sec": 3,          # per-chat alert throttle
     "quiet_hours": None,            # e.g. [23, 8] -> no alerts 23:00..08:00
 }
