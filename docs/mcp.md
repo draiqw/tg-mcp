@@ -63,7 +63,7 @@ The same setup in `~/.claude.json` (scope user/local) or in the project's `.mcp.
   "mcpServers": {
     "telegram": {
       "command": "uv",
-      "args": ["--directory", "/absolute/path/to/telegram-mcp", "run", "tg-mcp"]
+      "args": ["--directory", "/absolute/path/to/tg-mcp", "run", "tg-mcp"]
     }
   }
 }
@@ -156,7 +156,7 @@ are no secrets in its output — it is meant to be attached to an issue in full.
 | `Telegram daemon is not responding` | the daemon is not up: `uv run tg daemon start` (in docker `docker compose up -d`) |
 | `Connection refused` with a live socket | the daemon died, the socket file stayed: `tg daemon restart` |
 | the server is there, the tools are not | the Claude Code session started before the install — restart it |
-| `✘ Failed to connect` in `claude mcp list` | check that the command works by hand: `uv --directory /path/to/telegram-mcp run tg-mcp` |
+| `✘ Failed to connect` in `claude mcp list` | check that the command works by hand: `uv --directory /path/to/tg-mcp run tg-mcp` |
 | a write returns an error | `TG_ALLOW_WRITE=0` in `.env`, or a limit was hit |
 
 Only what breaks around MCP is listed here. The rest — sign-in, the daemon, alerts,

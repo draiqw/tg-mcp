@@ -38,7 +38,7 @@ below.
 | `Connection refused` with `data/daemon.sock` present | the daemon died, the socket file stayed | `uv run tg daemon restart` |
 | `the daemon does not know method '...'` | after `git pull` the daemon keeps running the old code | `uv run tg daemon restart` |
 | no `tg_*` at all in Claude, though `claude mcp list` shows `telegram` | the client session started before the installation: MCP servers and subagents are read once at startup | restart Claude Code |
-| `✘ Failed to connect` in `claude mcp list` | the client cannot start the server command | run it by hand: `uv --directory /absolute/path/to/telegram-mcp run tg-mcp` — it must wait for input, not exit |
+| `✘ Failed to connect` in `claude mcp list` | the client cannot start the server command | run it by hand: `uv --directory /absolute/path/to/tg-mcp run tg-mcp` — it must wait for input, not exit |
 | Claude Desktop does not find `uv` | Desktop starts the server with a stripped-down PATH | give the absolute path to `uv` (`command -v uv`) and restart the app |
 | a writing tool returns an error | `TG_ALLOW_WRITE=0`, `confirm_writes` on with no answer from the owner, or a limit was hit | `uv run tg capabilities` names the reason; limits and modes are in [configuration.md](configuration.md) |
 | `Chats matching '...': N` | the name matched several chats; the agent does not guess | take the `id` from the list of candidates in the error itself |
@@ -81,7 +81,9 @@ uv run tg doctor
 uv run tg daemon logs -n 50
 ```
 
-The first contains no secrets by construction. The second is worth looking
-through before sending: chat names and message texts inside Telethon tracebacks
-turn up rarely, but they turn up. Never attach `.env` — it holds the application
-keys and the bot token.
+The first contains no secrets by construction. The second has to be looked
+through and cleaned up before sending. Your name and id are certainly in the
+log: the start line `telegram[main]: signed in as NAME (id 123456789)` is written
+on every daemon start, that is, it will land in almost any slice of it. Plus chat
+names and pieces of text inside Telethon tracebacks. Never attach `.env` — it
+holds the application keys and the bot token.

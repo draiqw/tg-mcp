@@ -12,7 +12,7 @@ solves the problem without a port: the socket stays inside.
 ## Build and run
 
 ```bash
-cd telegram-mcp                            # the directory the project is cloned into
+cd tg-mcp                            # the directory the project is cloned into
 cp .env.example .env && chmod 600 .env    # fill in TG_API_ID / TG_API_HASH / TG_BOT_TOKEN
 docker compose build
 ```

@@ -44,6 +44,21 @@ MCP_NAME = "telegram"
 AGENT_FILES = ("telegram.md", "telegram-watch.md")
 AGENT_DIR = Path.home() / ".claude" / "agents"
 
+
+def agents_src_dir() -> Path:
+    """Where the subagent sources come from.
+
+    In a clone this is `agents/` next to the code. When installed as a package
+    `ROOT` points inside site-packages, where there is no `agents/` at all — the
+    same files are put there by the wheel build (force-include in pyproject).
+    Both places are checked, otherwise `tg doctor` from an installed package
+    would fail with FileNotFoundError.
+    """
+    repo = config.ROOT / "agents"
+    if repo.is_dir():
+        return repo
+    return Path(__file__).resolve().parent / "agents"
+
 # Autostart: launchd on macOS, a user systemd unit on Linux. Both forms live in
 # the repository as templates with placeholders instead of paths — only the
 # installation can substitute them, because the project directory and the path
@@ -81,13 +96,22 @@ def autostart_kind() -> str | None:
     return None
 
 
+def autostart_src(name: str) -> Path:
+    """Autostart template: in a clone it is in the root, in an installed package
+    inside the package (see agents_src_dir, the reason is the same)."""
+    repo = config.ROOT / name
+    if repo.exists():
+        return repo
+    return Path(__file__).resolve().parent / "autostart" / name
+
+
 def autostart_paths() -> tuple[Path, Path] | None:
     """(template in the repository, where it gets installed) for this system."""
     kind = autostart_kind()
     if kind == "launchd":
-        return config.ROOT / PLIST_NAME, LAUNCH_AGENTS / PLIST_NAME
+        return autostart_src(PLIST_NAME), LAUNCH_AGENTS / PLIST_NAME
     if kind == "systemd":
-        return config.ROOT / UNIT_NAME, SYSTEMD_USER_DIR / UNIT_NAME
+        return autostart_src(UNIT_NAME), SYSTEMD_USER_DIR / UNIT_NAME
     return None
 
 
@@ -198,11 +222,17 @@ def agent_rows(target_dir: Path | None = None) -> list[dict]:
     "the tool is somehow not visible".
     """
     dst_dir = target_dir or AGENT_DIR
+    src_dir = agents_src_dir()
     rows = []
     for name in AGENT_FILES:
-        src = config.ROOT / "agents" / name
+        src = src_dir / name
         dst = dst_dir / name
-        if not dst.exists():
+        if not src.exists():
+            # There is no source at all — the installation is incomplete. That is
+            # not the same as "not laid out": it is fixed not by the wizard but
+            # by a proper installation.
+            state = "no-source"
+        elif not dst.exists():
             state = "missing"
         elif filecmp.cmp(src, dst, shallow=False):
             state = "same"
@@ -225,7 +255,9 @@ def install_agents(target_dir: Path | None = None,
     dst_dir.mkdir(parents=True, exist_ok=True)
     out = []
     for row in agent_rows(dst_dir):
-        if row["state"] == "same":
+        if row["state"] == "no-source":
+            action = "no-source"
+        elif row["state"] == "same":
             action = "same"
         elif row["state"] == "missing":
             shutil.copyfile(row["src"], row["dst"])
@@ -331,7 +363,11 @@ def plan(st: dict) -> list[Step]:
         ),
         Step(
             key="login", title="sign-in to the account",
-            required=True, done=st["session_exists"],
+            # An unfinished sign-in leaves login_state.json behind: the session
+            # file is already there, there is no authorization in it yet. To
+            # count such a step as done means leading the person to the daemon,
+            # which will fall over on this session.
+            required=True, done=st["session_exists"] and not st["login_pending"],
             detail=f"session in place: {st['session']}",
             cost="without the sign-in the daemon has nothing to work with: there is no account",
             fix="uv run tg login",
@@ -566,10 +602,13 @@ def report(st: dict) -> list[dict]:
                 "same": f"{row['name']}: matches the repository",
                 "differs": f"{row['name']}: differs from the repository",
                 "missing": f"{row['name']}: not installed",
+                "no-source": f"{row['name']}: no source, nothing to install",
             }[state],
             None if state == "same"
-            else f"uv run tg init — it will ask again and update; by hand: "
-                 f"cp {st['root']}/agents/{row['name']} {row['dst']}",
+            else ("the installation is incomplete — the subagents live in the repository: "
+                  "git clone https://github.com/draiqw/tg-mcp" if state == "no-source"
+                  else f"uv run tg init — it will ask again and update; by hand: "
+                       f"cp {st['root']}/agents/{row['name']} {row['dst']}"),
         ))
 
     add(_row(

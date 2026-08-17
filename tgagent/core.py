@@ -562,7 +562,11 @@ class TelegramService:
     async def start(self) -> dict:
         await self.client.connect()
         if not await self.client.is_user_authorized():
-            raise RuntimeError(
+            # SetupError, not RuntimeError: the session file exists but holds no
+            # sign-in — that is an unfinished installation step, and the daemon
+            # prints such a message as is. RuntimeError went to the general
+            # branch and produced a traceback for a perfectly expected state.
+            raise config.SetupError(
                 f"The session of account {self.account!r} is not authorised: the "
                 "sign-in code is entered by the owner, the agent never sees it. Run "
                 f"`{config.login_command(self.account)}` in your own terminal."

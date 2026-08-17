@@ -17,7 +17,7 @@ system carries an older Python. CI runs the checks on both ends of the range, 3.
 3.13, so the two cannot drift apart quietly.
 
 ```bash
-git clone git@github.com:draiqw/telegram-mcp.git && cd telegram-mcp
+git clone git@github.com:draiqw/tg-mcp.git && cd tg-mcp
 uv sync                      # dependencies + the dev group (pytest, ruff)
 ```
 

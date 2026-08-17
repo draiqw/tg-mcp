@@ -691,3 +691,59 @@ def test_wizard_says_docker_where_there_is_no_autostart(
     assert w.step_autostart(step) == 0
     assert "docker" in capsys.readouterr().out
     assert w.skipped
+
+
+# --- an unfinished sign-in and an incomplete installation ---------------------
+
+
+def test_login_step_is_not_done_until_the_sign_in_is_finished() -> None:
+    """The session file appears before the code is typed, and `login_state.json`
+    lives exactly as long as the sign-in is not finished. To count the step by
+    that one file alone means leading the person to the daemon, which falls over
+    on such a session."""
+    unfinished = state(session_exists=True, login_pending=True)
+    assert {s.key: s for s in install.plan(unfinished)}["login"].done is False
+    assert "login" in [s.key for s in install.pending(unfinished)]
+    # A finished sign-in still closes the step just the same.
+    finished = state(session_exists=True)
+    assert {s.key: s for s in install.plan(finished)}["login"].done is True
+
+
+def test_doctor_does_not_crash_when_the_subagent_sources_are_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An installation as a package without the subagent files is not a crash but
+    an incomplete installation.
+
+    Earlier `agent_rows` called filecmp on a non-existent source and fell over
+    with FileNotFoundError right inside the diagnostics, that is in the one place
+    a person goes to sort things out.
+    """
+    monkeypatch.setattr(install, "agents_src_dir", lambda: tmp_path / "no-such-dir")
+    dst = tmp_path / "agents-home"
+    dst.mkdir()
+    (dst / install.AGENT_FILES[0]).write_text("somebody else's copy")
+    rows = install.agent_rows(dst)
+    assert {r["state"] for r in rows} == {"no-source"}
+    # And the report on such a state is assembled whole, instead of falling over
+    # on the formatting.
+    report = install.report(state(agents=[{k: v for k, v in r.items() if k != "src"}
+                                          for r in rows]))
+    assert any("nothing to install" in row["text"] for row in report)
+
+
+def test_subagents_are_not_copied_from_nowhere(tmp_path: Path,
+                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(install, "agents_src_dir", lambda: tmp_path / "no-such-dir")
+    out = install.install_agents(tmp_path / "agents-home")
+    assert {r["action"] for r in out} == {"no-source"}
+
+
+def test_subagent_sources_are_looked_for_next_to_the_code_too(monkeypatch: pytest.MonkeyPatch,
+                                                              tmp_path: Path) -> None:
+    """In a clone this is `agents/` in the root; when installed as a package there
+    is no root, and the same files lie inside the package."""
+    assert install.agents_src_dir() == config.ROOT / "agents"
+    monkeypatch.setattr(config, "ROOT", tmp_path / "empty")
+    assert install.agents_src_dir().name == "agents"
+    assert install.agents_src_dir().parent == Path(install.__file__).resolve().parent

@@ -13,6 +13,7 @@ modules that it drifts apart.
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import pytest
@@ -166,3 +167,93 @@ async def test_the_daemon_explains_the_missing_session_instead_of_crashing(
     with pytest.raises(config.SetupError) as exc:
         await daemon.Daemon().run()
     assert config.login_command() in str(exc.value)
+
+
+# --- an interrupted sign-in ---------------------------------------------------
+
+
+class _AbortingClient:
+    """Telethon in exactly the part the sign-in touches.
+
+    The session file is created in connect() — like a real client does: it is
+    precisely because of that an interrupted sign-in used to leave a stub file on
+    disk.
+    """
+
+    def __init__(self, path: str, api_id: int, api_hash: str, **kw) -> None:
+        self.path = Path(str(path) + ".session")
+        self.disconnected = False
+
+    async def connect(self) -> None:
+        # A real client opens the existing database and creates a new one only if
+        # there is none; a fake that always writes an empty file would hide
+        # exactly the bug this test was written for.
+        if not self.path.exists():
+            self.path.write_text("")
+
+    async def is_user_authorized(self) -> bool:
+        return False
+
+    async def disconnect(self) -> None:
+        self.disconnected = True
+
+
+@pytest.fixture
+def aborting_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sign-in that breaks off at the very first question (Ctrl-D, `< /dev/null`)."""
+    import telethon
+
+    monkeypatch.setattr(telethon, "TelegramClient", _AbortingClient)
+    monkeypatch.setattr(
+        "builtins.input", lambda *a: (_ for _ in ()).throw(EOFError())
+    )
+
+
+def test_an_interrupted_sign_in_leaves_no_session_file(
+    aborting_login, data_dir: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """A stub file on disk used to fool everything else.
+
+    list_accounts, `tg doctor` and the wizard count an account by the presence of
+    the file. As long as the file stayed, the wizard skipped the sign-in step and
+    led to the daemon, which crashed on that session — and the person read a
+    traceback instead of "sign in".
+    """
+    assert cli.cmd_login(argparse.Namespace(account=None, brief=False)) == 1
+    assert not (data_dir / "session.session").exists()
+    assert config.list_accounts() == []
+    out = capsys.readouterr().out
+    assert "Traceback" not in out
+    assert config.login_command() in out
+
+
+def test_an_interrupted_sign_in_does_not_touch_an_already_working_session(
+    aborting_login, data_dir: Path
+) -> None:
+    """A repeated `tg login` on a live account is an everyday thing (to look at who
+    is signed in, for example). Breaking it off must not cost the session."""
+    session = data_dir / "session.session"
+    session.write_text("working session")
+    assert cli.cmd_login(argparse.Namespace(account=None, brief=False)) == 1
+    assert session.read_text() == "working session"
+
+
+def test_the_session_file_is_closed_to_others_from_the_first_second(
+    monkeypatch: pytest.MonkeyPatch, data_dir: Path
+) -> None:
+    """The permissions used to be set only at the end of a successful sign-in, and
+    between connect() and typing the code there are two questions to the person —
+    all that time the file lay there with the default umask."""
+    import telethon
+
+    seen: list[int] = []
+
+    class _CheckingClient(_AbortingClient):
+        async def is_user_authorized(self) -> bool:
+            seen.append(self.path.stat().st_mode & 0o777)
+            return False
+
+    monkeypatch.setattr(telethon, "TelegramClient", _CheckingClient)
+    monkeypatch.setattr("builtins.input", lambda *a: (_ for _ in ()).throw(EOFError()))
+    cli.cmd_login(argparse.Namespace(account=None, brief=False))
+    assert seen == [0o600]

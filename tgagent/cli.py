@@ -123,7 +123,16 @@ def cmd_link_bot(args) -> int:
 
 
 def cmd_login(args) -> int:
-    return asyncio.run(_login(args))
+    # Ctrl-C, Ctrl-D and `tg login < /dev/null` are not a program failure but the
+    # ordinary way a person leaves a dialogue. A traceback on them frightens for
+    # no reason, and it gets in the way of the `tg init` wizard: it catches them
+    # itself and prints its own continuation.
+    try:
+        return asyncio.run(_login(args))
+    except (KeyboardInterrupt, EOFError):
+        _p("\nSign-in interrupted, nothing was saved. Retry: "
+           + config.login_command(getattr(args, "account", None)))
+        return 1
 
 
 async def _login(args) -> int:
@@ -137,11 +146,24 @@ async def _login(args) -> int:
         _p(str(exc))
         return 1
 
+    session_file = Path(str(config.session_path(getattr(args, "account", None))) + ".session")
+    # Telethon creates the session file in connect(), long before the code is
+    # entered. An interrupted sign-in left a stub file on disk without
+    # authorization — and list_accounts, `tg doctor` and the wizard all counted
+    # the account as signed in on it and led to the daemon, which died on it.
+    # So we remember whether the file was there before us, and remove our own.
+    preexisting = session_file.exists()
+
     client = TelegramClient(
         str(config.session_path(getattr(args, "account", None))), api_id, api_hash,
         **config.client_info(),
     )
     await client.connect()
+    # Permissions are set right away, not only on the successful branch: the file
+    # is already on disk, and there are two more questions to the person before
+    # the sign-in ends — all that time it would be lying there with 644.
+    if session_file.exists():
+        session_file.chmod(0o600)
     # The `tg init` wizard prints the same digest itself, at the very end. Here it
     # would be a second copy in the middle of the installation — hence the flag,
     # not a separate function.
@@ -154,25 +176,29 @@ async def _login(args) -> int:
             _onboarding("What you can do", getattr(args, "account", None))
         return 0
 
-    # Blocking the loop on the two lines below is the whole point of the step: this
-    # is a one-off sign-in from a terminal, nothing else spins in this process,
-    # and waiting is exactly what we owe the person — asyncio has no async
-    # replacement for input() anyway.
-    phone = input("Phone in +79991234567 format: ").strip()  # noqa: ASYNC250 — waiting for a human
-    sent = await client.send_code_request(phone)
-    _p("Code sent to Telegram (not SMS — check the app).")
-    code = input("Code: ").strip()  # noqa: ASYNC250 — waiting for a human
+    signed_in = False
     try:
-        await client.sign_in(phone, code, phone_code_hash=sent.phone_code_hash)
-    except SessionPasswordNeededError:
-        pwd = getpass("Two-factor password (hidden input): ")
-        await client.sign_in(password=pwd)
-    me = await client.get_me()
-    await client.disconnect()
+        # Blocking the loop on the two lines below is the whole point of the step:
+        # this is a one-off sign-in from a terminal, nothing else spins in this
+        # process, and waiting is exactly what we owe the person — asyncio has no
+        # async replacement for input().
+        phone = input("Phone in +79991234567 format: ").strip()  # noqa: ASYNC250 — waiting for a human
+        sent = await client.send_code_request(phone)
+        _p("Code sent to Telegram (not SMS — check the app).")
+        code = input("Code: ").strip()  # noqa: ASYNC250 — waiting for a human
+        try:
+            await client.sign_in(phone, code, phone_code_hash=sent.phone_code_hash)
+        except SessionPasswordNeededError:
+            pwd = getpass("Two-factor password (hidden input): ")
+            await client.sign_in(password=pwd)
+        signed_in = True
+        me = await client.get_me()
+    finally:
+        await client.disconnect()
+        if not signed_in and not preexisting:
+            session_file.unlink(missing_ok=True)
 
-    session_file = Path(str(config.session_path(getattr(args, "account", None))) + ".session")
-    if session_file.exists():
-        session_file.chmod(0o600)
+    session_file.chmod(0o600)
     _p(f"\nDone: signed in as {me.first_name} (@{me.username}, id {me.id}).")
     _p("Session: " + str(session_file))
     # The account tier is known right here: it is a flag of the user who has just
@@ -664,6 +690,12 @@ def main() -> None:
     )
     dsub.add_parser("stop").set_defaults(fn=cmd_daemon_stop)
     dsub.add_parser("restart").set_defaults(fn=cmd_daemon_restart)
+    # `tg daemon status` is what people type first, even though the state lives
+    # in `tg status`. Cheaper to accept both forms than to explain why one of
+    # them is the wrong one.
+    with_account(dsub.add_parser("status", help="same as tg status")).set_defaults(
+        fn=cmd_status
+    )
     logs = dsub.add_parser("logs")
     logs.add_argument("-n", "--lines", type=int, default=40)
     logs.set_defaults(fn=cmd_daemon_logs)

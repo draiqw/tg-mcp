@@ -14,8 +14,8 @@ Do not open a public issue: a description of a hole in the tracker gets read
 faster than a fix ships.
 
 1. **Private vulnerability reporting** on GitHub —
-   [Security → Report a vulnerability](https://github.com/draiqw/telegram-mcp/security/advisories/new)
-   in the `draiqw/telegram-mcp` repository. This is the main channel.
+   [Security → Report a vulnerability](https://github.com/draiqw/tg-mcp/security/advisories/new)
+   in the `draiqw/tg-mcp` repository. This is the main channel.
 2. If private reporting is unavailable — open an empty issue titled "security
    contact" with no details, and you will be told where to write.
 

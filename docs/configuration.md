@@ -333,7 +333,7 @@ contains the exact command with the label:
 
 ```
 Account 'work' is not signed in (available: main). The owner signs in themselves,
-the agent does not see the code: cd /path/to/telegram-mcp && uv run tg login --account work
+the agent does not see the code: cd /path/to/tg-mcp && uv run tg login --account work
 ```
 
 The directory substituted is the real one — the one the agent was started from —

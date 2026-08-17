@@ -7,13 +7,13 @@ the code talks to Telegram. Everything else is transport and scaffolding:
 
 | File | Lines | Role |
 |---|---|---|
-| **`tgagent/core.py`** | 5179 | **core: all account operations, chat resolution, limits** |
+| **`tgagent/core.py`** | 5183 | **core: all account operations, chat resolution, limits** |
 | `tgagent/daemon.py` | 2041 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
 | `tgagent/mcp_server.py` | 1575 | 79 tools, each one a single call to the daemon |
 | `tgagent/index.py` | 670 | local index of the correspondence: sqlite + FTS5, Russian morphology |
 | `tgagent/memory.py` | 234 | chat dossiers: file format, prompt, language-model call |
-| `tgagent/cli.py` | 681 | setup, sign-in, daemon control |
-| `tgagent/install.py` | 1038 | the `tg init` wizard and the `tg doctor` diagnostics: installation state, steps, registration in the client |
+| `tgagent/cli.py` | 713 | setup, sign-in, daemon control |
+| `tgagent/install.py` | 1077 | the `tg init` wizard and the `tg doctor` diagnostics: installation state, steps, registration in the client |
 | `tgagent/config.py` | 473 | paths, `.env`, rules, limits |
 | `tgagent/capabilities.py` | 764 | tables of "what a given tool needs", checks of the local setup, summary text, translation of Telegram errors |
 | `tgagent/alerts.py` | 138 | Bot API: alerts, commands, buttons under the agent's questions |

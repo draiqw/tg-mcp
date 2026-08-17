@@ -8,7 +8,7 @@
 
 [Unit]
 Description=Telegram agent daemon (tgagent)
-Documentation=https://github.com/draiqw/telegram-mcp
+Documentation=https://github.com/draiqw/tg-mcp
 
 [Service]
 Type=simple

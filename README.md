@@ -1,4 +1,4 @@
-# telegram-mcp
+# tg-mcp
 
 An MCP server on top of a **personal** Telegram account: 79 tools, MTProto, not the Bot API.
 
@@ -76,7 +76,7 @@ Any directory will do: the project takes its paths from itself, and every comman
 prints already contains the real path to this copy.
 
 ```bash
-git clone https://github.com/draiqw/telegram-mcp && cd telegram-mcp
+git clone https://github.com/draiqw/tg-mcp && cd tg-mcp
 uv sync
 uv run tg init
 ```
@@ -215,7 +215,7 @@ uv run tg accounts                    # which accounts are signed in and which o
 uv run tg login --account work        # add a second account
 uv run tg accounts --default work     # change the default account for good
 uv sync --extra local-whisper         # local audio transcription (optional)
-uv run tg daemon start|run|stop|restart|logs
+uv run tg daemon start|run|stop|restart|status|logs
 uv run tg call dialogs '{"limit": 5}' # poke a daemon method bypassing MCP
 uv run tg logout                      # revoke the session and wipe the files
 ```
