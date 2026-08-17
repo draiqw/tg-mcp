@@ -10,7 +10,11 @@ of the decisions in the code look redundant.
 
 ## Environment
 
-You need Python 3.13 and [uv](https://docs.astral.sh/uv/).
+You need Python 3.11 or newer and [uv](https://docs.astral.sh/uv/); the system is macOS
+or Linux. The 3.11 floor is there because of a single `datetime.UTC`; raising it (and
+reaching for 3.12+ syntax) without a reason is not worth it — it cuts off everyone whose
+system carries an older Python. CI runs the checks on both ends of the range, 3.11 and
+3.13, so the two cannot drift apart quietly.
 
 ```bash
 git clone git@github.com:draiqw/telegram-mcp.git && cd telegram-mcp
@@ -22,9 +26,9 @@ reproducible environment matters more here than freedom of versions. The docker 
 built with `uv sync --locked` and fails if the lock has drifted from `pyproject.toml`.
 When you change dependencies, commit `pyproject.toml` and `uv.lock` together.
 
-To work with a live account (only if you actually need one) you need `.env` and the
-sign-in, as in the [README](README.md#quick-start). **Neither is required for the tests
-or for selfcheck.**
+To work with a live account (only if you actually need one) run `uv run tg init`, which
+also walks you through the keys and the sign-in; to inspect an existing installation, run
+`uv run tg doctor`. **Neither is required for the tests or for selfcheck.**
 
 ## Checks
 
@@ -50,6 +54,11 @@ piece of `smoke.py`.
 daemon. If it complains, the layers or the documentation have drifted apart — it is not
 "the script is out of date".
 
+Before a tag is placed there are more checks: a from-scratch install, both ends of the
+declared Python range, a live run, and a sweep of the tree for personal data. They are
+collected in [docs/release.md](docs/release.md) — that is a list for whoever publishes,
+not for whoever sends a PR.
+
 ## The rule of three layers
 
 A new capability is three places and not one more:
@@ -70,7 +79,7 @@ the fifth exception, it almost certainly is not.
 **Every tool is documented in [docs/tools.md](docs/tools.md)** — with its parameters and
 with what it actually does. This is not bureaucracy: the description in `docs/tools.md`
 is exactly what the model uses to decide whether to call the tool. Selfcheck will not let
-an undocumented tool through, and rightly so. Numbers like "77 tools" in the
+an undocumented tool through, and rightly so. Numbers like "79 tools" in the
 documentation are checked against reality too — you will have to fix them.
 
 A separate word about writing capabilities. Everything that changes the account must go

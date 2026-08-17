@@ -21,6 +21,14 @@ permissions:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # Both ends of the declared requires-python. Checking only one is pointless:
+      # on 3.13 you do not see syntax that will not compile for someone on 3.11, and
+      # on 3.11 alone you do not see what broke in the newer versions. The middle
+      # (3.12) adds nothing of its own and is not taken into the matrix.
+      matrix:
+        python: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v7
 
@@ -30,10 +38,11 @@ jobs:
         uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
+          python-version: ${{ matrix.python }}
 
       # --locked: the lock must agree with pyproject.toml, otherwise it is an error,
-      # not a reason to recompute the dependencies on the fly. Python 3.13 uv will
-      # download itself — the version is set in requires-python.
+      # not a reason to recompute the dependencies on the fly. The interpreter comes
+      # from the matrix (setup-uv sets UV_PYTHON), not "whichever was in the image".
       - name: Dependencies
         run: uv sync --locked
 

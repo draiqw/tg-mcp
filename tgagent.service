@@ -1,0 +1,32 @@
+# Daemon autostart on Linux: a systemd user unit, no root needed.
+#
+# The wizard installs it (`uv run tg init`, last step): it substitutes the real
+# path to uv and to the project directory here. By hand — see
+# docs/configuration.md, section "Autostart". The paths in this file are
+# placeholders, and substituting them is mandatory: the service starts without
+# your shell and expands neither `~` nor variables.
+
+[Unit]
+Description=Telegram agent daemon (tgagent)
+Documentation=https://github.com/draiqw/telegram-mcp
+
+[Service]
+Type=simple
+WorkingDirectory=/home/YOUR_USER/tg-agent
+ExecStart=/home/YOUR_USER/.local/bin/uv run --directory /home/YOUR_USER/tg-agent python -m tgagent.daemon
+# Same meaning as KeepAlive/SuccessfulExit in launchd: bring it back after a
+# crash, but not after a regular stop (`systemctl --user stop tgagent`).
+# It is also the answer to "the network is not up yet" and to "the Telegram
+# sign-in has not been done yet": a user unit cannot wait for the system
+# network-online.target, so the daemon simply retries every half a minute.
+Restart=on-failure
+RestartSec=30
+# The daemon writes its log to stdout. We put it in the same file as
+# `tg daemon start` — otherwise `uv run tg daemon logs` would show nothing. It is
+# duplicated in journalctl (`journalctl --user -u tgagent`), where the restarts
+# are visible too.
+StandardOutput=append:/home/YOUR_USER/tg-agent/data/daemon.log
+StandardError=append:/home/YOUR_USER/tg-agent/data/daemon.log
+
+[Install]
+WantedBy=default.target

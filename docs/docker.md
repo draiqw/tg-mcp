@@ -12,7 +12,7 @@ solves the problem without a port: the socket stays inside.
 ## Build and run
 
 ```bash
-cd ~/tg-agent
+cd telegram-mcp                            # the directory the project is cloned into
 cp .env.example .env && chmod 600 .env    # fill in TG_API_ID / TG_API_HASH / TG_BOT_TOKEN
 docker compose build
 ```
@@ -44,7 +44,7 @@ claude mcp add telegram -- docker exec -i tgagent tg-mcp
 | | |
 |---|---|
 | Image | code and dependencies, nothing else |
-| `./data` → `/data` | session, `rules.json`, `events.jsonl`, `actions.jsonl`, `reminders.json`, `digest.json`, `index.db`, downloads |
+| `./data` → `/data` | session, `rules.json`, `settings.json`, `events.jsonl`, `actions.jsonl`, `reminders.json`, `digest.json`, `index.db`, `memory/`, downloads |
 | `.env` | read by `docker compose` and passed as environment variables; not copied into the image |
 
 `TG_DATA_DIR=/data` is baked into the image, so the same code works both from a checkout
@@ -91,9 +91,11 @@ seconds.
 ## Health and restart
 
 `HEALTHCHECK` in the image calls `tg call whoami` — that is, it checks not "the process is
-alive" but "the daemon answers on the socket and the session is authorized". The
-`restart: unless-stopped` policy brings the container up after a machine reboot; with this
-setup no separate launchd agent is needed.
+alive" but "the daemon answers on the socket and the session is authorized". No request to
+Telegram is made, so the check does not catch a broken network connection: that case is
+covered in [troubleshooting.md](troubleshooting.md). The `restart: unless-stopped` policy
+brings the container up after a machine reboot; with this setup no separate autostart
+(launchd on macOS, systemd on Linux) is needed.
 
 Shutdown is graceful: the daemon catches SIGTERM, closes the Telegram client, removes the
 socket and the pid file. `stop_grace_period: 20s` gives it the time to do so.

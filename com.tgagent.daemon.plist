@@ -1,5 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Daemon autostart on macOS: a launchd user agent, no administrator rights
+    needed. The wizard installs it (`uv run tg init`, last step): it substitutes
+    the real path to uv and to the project directory here. By hand — see
+    docs/configuration.md, section "Autostart".
+
+    The paths in this file are placeholders, and substituting them is mandatory:
+    launchd starts without your shell and expands neither `~` nor variables.
+-->
 <plist version="1.0">
 <dict>
     <key>Label</key>
@@ -36,10 +45,12 @@
     <key>StandardErrorPath</key>
     <string>/Users/YOUR_USER/tg-agent/data/daemon.log</string>
 
+    <!-- launchd gives the process a bare PATH. Both usual Homebrew branches are
+         listed at once: /opt/homebrew on Apple Silicon, /usr/local on Intel. -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
 </dict>
 </plist>

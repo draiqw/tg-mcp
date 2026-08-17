@@ -544,9 +544,7 @@ class TelegramService:
             str(config.session_path(self.account)),
             api_id,
             api_hash,
-            device_model="claude-tg-agent",
-            system_version="macOS",
-            app_version="tgagent 0.1",
+            **config.client_info(),
         )
         self.guard = TelegramService._shared_guard
         self.me = None
@@ -3102,7 +3100,7 @@ class TelegramService:
         key = config.groq_key()
         if not key:
             raise RuntimeError(
-                "GROQ_API_KEY is not set. Add the key to ~/tg-agent/.env "
+                f"GROQ_API_KEY is not set. Add the key to {config.ENV_FILE} "
                 "(console.groq.com/keys)"
             )
         settings = config.whisper_settings()

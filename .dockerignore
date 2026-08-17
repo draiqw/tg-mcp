@@ -25,3 +25,4 @@ tests/
 scripts/
 agents/
 *.plist
+*.service

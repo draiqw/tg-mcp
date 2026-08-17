@@ -1867,11 +1867,11 @@ class Daemon:
         self.load_reminders()
         self.load_digest_state()
         labels = config.list_accounts()
-        if not labels:
-            raise RuntimeError(
-                "There is no session at all. The owner signs in themselves, the agent "
-                f"never sees the code: {config.login_command()}"
-            )
+        # An unfinished setup is not a daemon failure: SetupError is printed without
+        # a traceback and carries the command that finishes the setup off.
+        hint = config.setup_hint()
+        if hint or not labels:
+            raise config.SetupError(hint or "There is no Telegram session at all.")
         wanted = config.default_account()
         for label in labels:
             svc = TelegramService(label)
@@ -2026,6 +2026,12 @@ def main() -> None:
         asyncio.run(Daemon().run())
     except KeyboardInterrupt:
         pass
+    except config.SetupError as exc:
+        # Not "it crashed" but "there is nothing to start it with": a traceback would
+        # only get in the way here — a person reads the last lines of the log through
+        # `tg daemon logs`.
+        log(f"setup is not finished: {exc}")
+        sys.exit(1)
     except Exception:
         log("fatal:\n" + traceback.format_exc())
         sys.exit(1)

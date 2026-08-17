@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -159,6 +160,23 @@ LIMITS = {
 
 MAIN_ACCOUNT = "main"
 
+# How the installation signs itself in the Telegram device list (Settings → Devices).
+# One table for every place a client is created: the line "macOS" on somebody else's
+# Linux would simply be untrue in the list the owner uses to decide what to revoke.
+def client_info() -> dict[str, str]:
+    # The version comes from a late import: tgagent/__init__.py pulls nothing in, but
+    # an import at the top of the file would make config depend on the package that
+    # itself imports config — and config is loaded first, before everything else.
+    from tgagent import __version__
+
+    system = platform.system() or "unknown"
+    release = platform.release() or ""
+    return {
+        "device_model": "claude-tg-agent",
+        "system_version": f"{system} {release}".strip(),
+        "app_version": f"tgagent {__version__}",
+    }
+
 
 def normalize_account(account: str | None) -> str:
     label = (account or MAIN_ACCOUNT).strip().lower()
@@ -260,9 +278,43 @@ def not_logged_in(account: str | None, known: list[str] | None = None) -> str:
     )
 
 
+class SetupError(RuntimeError):
+    """The installation was not finished — not a code failure, but a step not taken.
+
+    A separate type is needed for exactly one thing: such a message is printed as
+    it is, without a traceback. A traceback on the first run, in front of somebody
+    from the outside, looks like a broken program, even though all that is missing
+    is `.env` or the sign-in.
+    """
+
+
+def setup_hint() -> str | None:
+    """What is missing right now — in one line and with the exact command.
+
+    None means everything is in place. One text for every entry point (the MCP
+    server, `tg daemon start`, the daemon itself): three different pieces of advice
+    for one unfinished installation are three different ideas of what to do next.
+    """
+    if not (env("TG_API_ID") and env("TG_API_HASH")):
+        return (
+            "The app keys (TG_API_ID/TG_API_HASH) are not set — you get them at "
+            f"my.telegram.org. The whole setup: cd {ROOT} && uv run tg init"
+        )
+    if not list_accounts():
+        return (
+            "There is no Telegram session at all. The owner signs in themselves, the agent "
+            f"never sees the code: {login_command()}"
+        )
+    return None
+
+
 def ensure_dirs() -> None:
-    DATA.mkdir(mode=0o700, exist_ok=True)
-    DOWNLOADS.mkdir(mode=0o700, exist_ok=True)
+    # parents=True: TG_DATA_DIR may point at a nested directory that does not exist
+    # yet (a volume in a container, ~/.local/share/tgagent/data). Without the
+    # parents, the very first run on somebody else's machine would fail with
+    # FileNotFoundError instead of simply creating the directory.
+    DATA.mkdir(mode=0o700, parents=True, exist_ok=True)
+    DOWNLOADS.mkdir(mode=0o700, parents=True, exist_ok=True)
 
 
 def load_env() -> None:
@@ -278,8 +330,9 @@ def env(name: str, default: str | None = None) -> str | None:
 def require_env(name: str) -> str:
     val = env(name)
     if not val:
-        raise RuntimeError(
-            f"{name} is not set in {ENV_FILE}. Run `uv run tg setup` in your terminal."
+        raise SetupError(
+            f"{name} is set neither in the environment nor in {ENV_FILE}. "
+            f"Run the setup in your own terminal: cd {ROOT} && uv run tg init"
         )
     return val
 

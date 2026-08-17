@@ -21,13 +21,28 @@ from . import config
 
 mcp = MCPServer("telegram")
 
-_DAEMON_HINT = (
-    "The Telegram daemon is not answering — no tool works without it. "
-    f"Start it: `cd {config.ROOT} && uv run tg daemon start` "
-    f"(if the session has not been created yet, first `{config.login_command()}` — "
-    "the code and the password are entered by the owner themselves, the agent "
-    "does not see them)."
-)
+
+def _daemon_hint() -> str:
+    """Why the tool did not work — by the state of the installation, not in general.
+
+    Claude Code brings the MCP server up before the person has had time to sign
+    in, so the most common first answer from this server is a refusal. The advice
+    "start the daemon" is a dead end on an empty installation: the daemon will not
+    start while there are no keys and no session. The state is read on every call,
+    not once at import time: the person goes through the installation exactly
+    between the server starting and the tool being called.
+    """
+    setup = config.setup_hint()
+    if setup:
+        # Pass the command to the owner word for word: the agent cannot run it
+        # for them — it does not see the keys, the code from Telegram or the 2FA
+        # password.
+        return f"The Telegram agent is not set up yet, so the tools do not work. {setup}"
+    return (
+        "The Telegram daemon is not answering — no tool works without it. "
+        f"Start it: `cd {config.ROOT} && uv run tg daemon start`, "
+        "then look at `uv run tg daemon logs`."
+    )
 
 
 AUTOSTART_TRIES = 30
@@ -55,7 +70,7 @@ async def call(method: str, **params: Any) -> Any:
             ) as resp:
                 data = await resp.json()
     except (aiohttp.ClientConnectorError, FileNotFoundError, OSError) as exc:
-        raise RuntimeError(f"{_DAEMON_HINT} ({exc})") from exc
+        raise RuntimeError(f"{_daemon_hint()} ({exc})") from exc
     if not data.get("ok"):
         raise RuntimeError(
             data.get("error") or "the daemon answered with an error and no description"
@@ -64,7 +79,9 @@ async def call(method: str, **params: Any) -> Any:
 
 
 def _try_autostart() -> None:
-    if not (config.SESSION.with_suffix(".session")).exists():
+    # Across all sessions, not just the main one: the default account can be any
+    # label, and on such an installation the daemon would never start by itself.
+    if not config.list_accounts():
         return
     try:
         subprocess.Popen(
@@ -78,7 +95,7 @@ def _try_autostart() -> None:
         return
     # The daemon comes up in a fraction of a second, but the first start also
     # opens the session database; we wait up to nine seconds, after that the call
-    # honestly runs into _DAEMON_HINT.
+    # honestly runs into _daemon_hint().
     for _ in range(AUTOSTART_TRIES):
         if config.SOCKET.exists():
             return
@@ -410,7 +427,7 @@ async def tg_download_many(chat: str, message_ids: list[int], dest: str | None =
     Args:
         chat: chat the messages belong to.
         message_ids: message ids carrying the media.
-        dest: target directory. Defaults to tg-agent/data/downloads.
+        dest: target directory. Defaults to the project's data/downloads.
     """
     return j(await call("download_many", chat=chat, message_ids=message_ids, dest=dest))
 
@@ -539,7 +556,7 @@ async def tg_index(
     """Local full-text index of the correspondence, for tg_search(engine="local").
 
     Nothing is indexed on its own — only the chats the owner names here. The
-    index is a plain-text copy of those chats in ~/tg-agent/data/index.db
+    index is a plain-text copy of those chats in the project's data/index.db
     (mode 600); action="drop" deletes it.
 
     Args:
@@ -670,7 +687,7 @@ async def tg_contacts(
 
 @mcp.tool()
 async def tg_download(chat: str, message_id: int, dest: str | None = None) -> str:
-    """Download the media attached to one message. Defaults to tg-agent/data/downloads."""
+    """Download the media attached to one message. Defaults to the project's data/downloads."""
     return j(await call("download", chat=chat, message_id=message_id, dest=dest))
 
 
@@ -789,7 +806,7 @@ async def tg_export(
         chats: several chats at once, up to 25. One failure does not stop the rest.
         limit: how many recent messages per chat, written oldest first.
         format: json for analysis, markdown or text for reading.
-        dest: target directory. Defaults to tg-agent/data/downloads.
+        dest: target directory. Defaults to the project's data/downloads.
         since: only messages from this point — "today" or an ISO datetime.
         until: upper bound, ISO datetime.
         media: also download every attachment.

@@ -9,20 +9,28 @@ The entry point is `tg-mcp` (declared in `pyproject.toml` as
 
 ## Claude Code, local install
 
+Registration is done by the wizard: `uv run tg init` checks whether `claude` is in
+PATH and whether the server is already registered, and runs exactly this command
+itself, with scope `user` and the real path to the project. Below is the same thing
+by hand, if the wizard does not suit you.
+
 ```bash
-claude mcp add telegram -- uv --directory ~/tg-agent run tg-mcp
+claude mcp add -s user telegram -- uv --directory "$PWD" run tg-mcp   # from the project directory
 ```
 
 `--` separates Claude Code's own options from the server command: everything after it
 is run as is. `uv --directory` is needed because the server starts from the client's
-working directory, not from `~/tg-agent`.
+working directory, not from this project's directory. `$PWD` here is expanded by the
+shell, so the client receives an absolute path already; in a config written by hand
+(see below) that does not work — nobody expands `~` or `$PWD` there, the path has to
+be written out in full.
 
 The scope is set with `-s`:
 
 ```bash
-claude mcp add -s user telegram -- uv --directory ~/tg-agent run tg-mcp     # in every project
-claude mcp add -s local telegram -- uv --directory ~/tg-agent run tg-mcp    # only in the current one (default)
-claude mcp add -s project telegram -- uv --directory ~/tg-agent run tg-mcp  # in the repository's .mcp.json
+claude mcp add -s user telegram -- uv --directory "$PWD" run tg-mcp     # in every project
+claude mcp add -s local telegram -- uv --directory "$PWD" run tg-mcp    # only in the current one (default)
+claude mcp add -s project telegram -- uv --directory "$PWD" run tg-mcp  # in the repository's .mcp.json
 ```
 
 For a personal Telegram, `user` or `local` make sense. `project` writes the config into
@@ -55,7 +63,7 @@ The same setup in `~/.claude.json` (scope user/local) or in the project's `.mcp.
   "mcpServers": {
     "telegram": {
       "command": "uv",
-      "args": ["--directory", "/Users/YOU/tg-agent", "run", "tg-mcp"]
+      "args": ["--directory", "/absolute/path/to/telegram-mcp", "run", "tg-mcp"]
     }
   }
 }
@@ -78,18 +86,21 @@ The docker variant:
 
 `~/Library/Application Support/Claude/claude_desktop_config.json`, the same
 `mcpServers` block. Important: Desktop starts the server with a stripped-down PATH and
-usually does not find `uv` — give the absolute path (`which uv`), for example
-`/Users/YOU/.local/bin/uv`. Restart the application after editing.
+usually does not find `uv` — give the absolute path (`command -v uv`; usually
+`~/.local/bin/uv`, expanded to an absolute one). Restart the application after editing.
 
 Both clients can be connected at the same time: the daemon owns the session, the clients
 only talk to it.
 
 ## Ready-made subagents
 
-`agents/` holds two descriptions. Copy them to where the client looks for them:
+`agents/` holds two descriptions. They are laid out by the same wizard (`uv run tg init`):
+if a file already exists and differs from the one in the repository, it asks whether to
+overwrite — a difference usually means the agent has an outdated tool set, but it may
+also be your own edit. By hand it is done like this:
 
 ```bash
-cp ~/tg-agent/agents/*.md ~/.claude/agents/
+cp agents/*.md ~/.claude/agents/    # from the project directory
 ```
 
 | Agent | Model | Set |
@@ -130,18 +141,26 @@ breakdown of what accounts share and what they keep apart are in
 ## Diagnostics
 
 ```bash
+uv run tg doctor                  # the whole install at once: what is in place, what is broken, what to do
 uv run tg status                  # daemon, session, socket, write permissions
 uv run tg daemon logs -n 50
 uv run tg call whoami             # a live RPC bypassing MCP
 ```
+
+`tg doctor` is the most convenient place to start: it also checks whether the server is
+registered and whether the subagents in `~/.claude/agents` match the repository. There
+are no secrets in its output — it is meant to be attached to an issue in full.
 
 | Symptom | Cause |
 |---|---|
 | `Telegram daemon is not responding` | the daemon is not up: `uv run tg daemon start` (in docker `docker compose up -d`) |
 | `Connection refused` with a live socket | the daemon died, the socket file stayed: `tg daemon restart` |
 | the server is there, the tools are not | the Claude Code session started before the install — restart it |
-| `✘ Failed to connect` in `claude mcp list` | check that the command works by hand: `uv --directory ~/tg-agent run tg-mcp` |
+| `✘ Failed to connect` in `claude mcp list` | check that the command works by hand: `uv --directory /path/to/telegram-mcp run tg-mcp` |
 | a write returns an error | `TG_ALLOW_WRITE=0` in `.env`, or a limit was hit |
+
+Only what breaks around MCP is listed here. The rest — sign-in, the daemon, alerts,
+transcripts, file permissions — is in [troubleshooting.md](troubleshooting.md).
 
 If the daemon is missing, the MCP server itself tries to bring it up once
 (`_try_autostart`) and waits up to 9 seconds for the socket to appear. If there is no

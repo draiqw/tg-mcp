@@ -67,47 +67,65 @@ and every guard. Everything else is transport around it. In more detail:
 
 ## Quick start
 
-You need Python 3.13 and [uv](https://docs.astral.sh/uv/).
+You need Python 3.11 or newer and [uv](https://docs.astral.sh/uv/). Exactly one thing
+holds that bar — `datetime.UTC`, an alias from 3.11; there is nothing from 3.12 or 3.13 in
+the code. The system is macOS or Linux: the MCP server talks to the daemon over a unix
+socket, so Windows is not supported (under WSL or docker it works).
 
-1. **The application keys.** Go to my.telegram.org → API development tools and create an
-   application. You will get `api_id` and `api_hash` — those are the MTProto keys.
-2. **A bot for notifications.** @BotFather → `/newbot`. Make a separate bot for the agent,
-   do not reuse an existing one. Alerts, the agent's questions and commands from your phone
-   come through it.
-3. **Installation:**
+Any directory will do: the project takes its paths from itself, and every command it
+prints already contains the real path to this copy.
 
-   ```bash
-   git clone https://github.com/draiqw/telegram-mcp ~/tg-agent && cd ~/tg-agent
-   cp .env.example .env && chmod 600 .env
-   uv sync
-   ```
+```bash
+git clone https://github.com/draiqw/telegram-mcp && cd telegram-mcp
+uv sync
+uv run tg init
+```
 
-4. **Setup and sign-in.** `tg setup` asks for the keys and the token and writes them into
-   `.env` (`api_hash` and the token are typed hidden). `tg login` asks for the phone, the
-   code from Telegram and, if 2FA is on, the cloud password — all of it typed by hand in
-   your own terminal. Both commands print a summary at the end: what level the account has,
-   what is already configured, what is missing and what to do about it.
+`tg init` is the wizard that brings the installation to a working state: the application
+keys, the sign-in, the notification bot, the daemon, registering the MCP server in Claude
+Code and the subagents in `~/.claude/agents`. Every step explains what it is for and what
+stops working without it.
 
-   ```bash
-   uv run tg setup
-   uv run tg login
-   uv run tg link-bot     # press Start in the chat with the bot, the command remembers chat_id
-   ```
+Three properties of the wizard are worth knowing in advance:
 
-5. **The daemon.** It owns the session; without it the tools do not work.
+- **Only `api_id`/`api_hash` and the sign-in are mandatory.** The bot, the model keys,
+  local transcription and autostart are skipped with Enter.
+- **The code from Telegram and the 2FA cloud password are typed by you.** The wizard does
+  not ask for them, does not fill them in and does not store them — it hands that step
+  over to `tg login`.
+- **Running it again is safe.** The wizard first looks at what is already done and does
+  only what is missing, so it also serves as "repair my installation".
 
-   ```bash
-   uv run tg daemon start
-   uv run tg status       # what is configured, what is not, whether the daemon is alive
-   uv run tg capabilities # what is available to you, what is blocked and by what exactly
-   ```
+What you will need along the way: an application at my.telegram.org → API development
+tools (that is where `api_id` and `api_hash` come from; without them only the Bot API is
+available, which means your own chats are invisible) and, if you want alerts, a
+**separate** bot from @BotFather — an existing one cannot be reused, its messages would
+become incoming messages for you and raise an alert about the alert.
 
-6. **Connecting to Claude Code:**
+At the end the wizard prints `tg capabilities`: what is available, what is blocked and by
+what exactly. An installation that already exists is taken apart by `uv run tg doctor` —
+what is installed, what is running, where the files are and what permissions they have,
+whether the daemon answers, whether MCP is registered, whether the subagents match the
+repository. There are no keys, no phone number and no account name in its output, so it
+can be attached to an issue in full. If something still does not work after it —
+[docs/troubleshooting.md](docs/troubleshooting.md): the common breakages are listed there
+as they look from outside.
 
-   ```bash
-   claude mcp add telegram -- uv --directory ~/tg-agent run tg-mcp
-   claude mcp list        # should show telegram ✔ Connected
-   ```
+### If you would rather go step by step
+
+The wizard does nothing on its own — it calls the same commands, and any of them can be
+run separately:
+
+```bash
+cp .env.example .env && chmod 600 .env
+uv run tg setup        # api_id/api_hash and the bot token, typed hidden
+uv run tg login        # phone, code from Telegram, cloud password if 2FA
+uv run tg link-bot     # press Start in the chat with the bot, the command remembers chat_id
+uv run tg daemon start # the daemon owns the session; without it the tools do not work
+uv run tg status       # what is configured, what is not, whether the daemon is alive
+claude mcp add -s user telegram -- uv --directory "$PWD" run tg-mcp
+cp agents/*.md ~/.claude/agents/
+```
 
 Next is [docs/mcp.md](docs/mcp.md): scope, Claude Desktop, the ready-made subagents,
 diagnostics. The settings for alerts, filters and limits are in
@@ -125,6 +143,29 @@ claude mcp add telegram -- docker exec -i tgagent tg-mcp
 
 The details, including why MCP is started inside the container and not on the host, are in
 [docs/docker.md](docs/docker.md).
+
+## What it costs
+
+The agent itself is free, and in its basic form there is nobody to pay: MTProto, the
+notification bot, server-side search, the local index, alerts, the digest, filters and
+reminders cost nothing. A bill can appear in exactly two places, and both of them need a
+key that is not there by default:
+
+- **Chat dossiers** (`tg_memory`) go to an external model and are billed per token — by
+  default `gpt-4o-mini` under the `OPENAI_API_KEY` key. This is the only thing that spends
+  money by itself, with no Claude running, and that is why it is limited three times over:
+  without a key the tool refuses, auto-refresh is off, and once it is on it runs into a cap
+  per hour (`memory_max_per_hour`, 10 by default). `TG_MEMORY_BASE_URL` takes the calls to
+  any compatible service, a local one included — free then.
+- **Audio transcription** (`tg_transcribe`) — three engines at three different prices. The
+  one built into Telegram is computed on its servers and is genuinely available with
+  Premium (without a subscription Telegram gives a small free quota). Groq's free tier is
+  limited by the number of requests, above it there is a paid plan. The local model costs
+  no money at all: its price is a gigabyte and a half of weights and the time it takes to
+  run.
+
+Claude's own tokens do not belong here — they are counted by your client, not by the
+agent. The keys and the caps are in [docs/configuration.md](docs/configuration.md).
 
 ## Risks
 
@@ -160,6 +201,8 @@ Read this before you start, not after. In full: [SECURITY.md](SECURITY.md) and
 ## Commands
 
 ```bash
+uv run tg init                        # the install wizard, also "repair the install"
+uv run tg doctor                      # diagnostics: what is installed, what is broken, what to do
 uv run tg status                      # what is configured, what is not, the state of the daemon
 uv run tg capabilities                # what is available, what is not and what to do about it
 uv run tg setup                       # the keys and the bot token
@@ -185,6 +228,7 @@ uv run tg logout                      # revoke the session and wipe the files
 | [docs/tools.md](docs/tools.md) | a reference for every MCP tool with its parameters |
 | [docs/configuration.md](docs/configuration.md) | environment variables, the three write modes, alert rules, the digest, inbox filters, several accounts, limits |
 | [docs/mcp.md](docs/mcp.md) | connecting as an MCP server, the subagents, diagnostics |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | what to do when it does not work: `tg doctor`, common breakages, where to look |
 | [docs/docker.md](docs/docker.md) | build, sign-in inside the container, updating, backup |
 | [docs/security.md](docs/security.md) | the threat model: what is protected, what is not, how to revoke access |
 

@@ -192,8 +192,8 @@ Rights in a chat are not analysed in this mode: they depend on the account, and
 one answer for all of them would be untrue.
 
 The same answer in human wording is printed by `uv run tg capabilities`, by the
-tail of `tg login` and by `tg setup`, and by the bot command `/can` (with an
-argument — about a particular chat).
+tail of `tg login`, by `tg setup` and the `tg init` wizard, and by the bot
+command `/can` (with an argument — about a particular chat).
 
 ### A refusal instead of a raw Telegram error
 
@@ -506,7 +506,7 @@ as `counters.photo` in `tg_chat_info`.
 is one chat) but the type of attachment: `photo`, `video`, `media`, `file`,
 `music`, `voice`, `round`, `gif`, `link`, `geo`, `pinned`, `contact`.
 
-### `tg_export(chat=None, chats=None, limit=1000, format="json", dest=None, since=None, until=None, media=False, media_max_mb=50)`
+### `tg_export(chat=None, limit=1000, format="json", dest=None, chats=None, since=None, until=None, media=False, media_max_mb=50)`
 Export of a correspondence to a file, up to 5000 messages per chat, in
 chronological order. `json` is for parsing, `markdown` and `text` for reading.
 

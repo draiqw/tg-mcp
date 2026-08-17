@@ -5,7 +5,9 @@
 They live in `.env` next to the code (or wherever `TG_ENV_FILE` points). The
 template is [`.env.example`](../.env.example). The file is read both when the
 daemon starts and by the CLI; permissions must be 600, and `tg setup` sets them
-itself.
+itself. To fill them in without remembering the variable names, use the wizard:
+`uv run tg init` asks only for what is missing, and `uv run tg doctor` then shows
+which of this list is set and what permissions the file has.
 
 | Variable | Required | What it is |
 |---|---|---|
@@ -144,7 +146,7 @@ machine — see [security.md](security.md).
 | `GROQ_API_KEY` | a key from console.groq.com/keys |
 | `TG_WHISPER_ENGINE` | `auto` (default), `telegram`, `groq`, `local` |
 | `TG_GROQ_MODEL` | `whisper-large-v3-turbo` by default |
-| `TG_WHISPER_MODEL` | the local model, `mlx-community/whisper-large-v3-turbo` by default |
+| `TG_WHISPER_MODEL` | the local model, `mlx-community/whisper-large-v3-turbo` by default (on non-Apple hardware the tail of that name is used — `large-v3-turbo` for faster-whisper) |
 | `TG_TRANSCRIBE_MAX_MB` | cap on file size, 24 MB |
 
 The watcher uses this by itself: with `transcribe_voice: true` (the default) an
@@ -163,8 +165,20 @@ The local engine is installed separately, because it drags megabytes along with
 it:
 
 ```bash
-uv sync --extra local-whisper      # mlx-whisper on Apple Silicon + faster-whisper
+uv sync --extra local-whisper
 ```
+
+What exactly gets installed is decided not by a human but by a marker in
+`pyproject.toml`: `mlx-whisper` goes only on Apple Silicon (`sys_platform ==
+'darwin'` and `platform_machine == 'arm64'`), and `faster-whisper` goes
+everywhere. On Linux and on an Intel Mac the same command simply does not pull
+mlx in, instead of failing on it.
+
+The core tries the engines in the same order: if `mlx_whisper` imported, it
+transcribes with that, otherwise it takes `faster-whisper`. Their model names
+differ, so for faster-whisper the tail `large-v3-turbo` is taken out of
+`mlx-community/whisper-large-v3-turbo`; there is no need to change
+`TG_WHISPER_MODEL` for the sake of Linux.
 
 The first run downloads the weights (turbo is ~1.6 GB) into the Hugging Face
 cache. After that everything is computed on the machine, nothing goes out. For
@@ -319,7 +333,7 @@ contains the exact command with the label:
 
 ```
 Account 'work' is not signed in (available: main). The owner signs in themselves,
-the agent does not see the code: cd /path/to/tg-agent && uv run tg login --account work
+the agent does not see the code: cd /path/to/telegram-mcp && uv run tg login --account work
 ```
 
 The directory substituted is the real one — the one the agent was started from —
@@ -329,18 +343,63 @@ project lies.
 The same command is printed by `tg_accounts` (the `add` field), `uv run tg
 accounts` and the daemon's message when it starts without a single session.
 
-## Autostart (macOS)
+## Autostart
 
-The daemon can be hung on launchd, so that it comes up together with the system:
+The daemon can be hung on the system's login service, so that alerts, the digest
+and reminders work without Claude running. The wizard offers this too (`uv run tg
+init`, the last step): it works out the system itself, substitutes the real paths
+to `uv` and to the project directory into the template, and enables the service.
+
+In both templates the paths are placeholders with `YOUR_USER`, and substituting
+them is mandatory: the project works from any directory, and the service is
+started without your shell and expands no `~` at all.
+
+### macOS (launchd)
+
+The template is `com.tgagent.daemon.plist` in the project root.
 
 ```bash
-sed -i '' "s|/Users/YOUR_USER|$HOME|g" com.tgagent.daemon.plist
-cp com.tgagent.daemon.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.tgagent.daemon.plist
+sed -e "s|/Users/YOUR_USER/.local/bin/uv|$(command -v uv)|g" \
+    -e "s|/Users/YOUR_USER/tg-agent|$PWD|g" \
+    com.tgagent.daemon.plist > ~/Library/LaunchAgents/com.tgagent.daemon.plist
+launchctl load -w ~/Library/LaunchAgents/com.tgagent.daemon.plist
 ```
 
 To unload it again — `launchctl unload ~/Library/LaunchAgents/com.tgagent.daemon.plist`.
-In docker this is not needed: there the role of autostart is played by `restart: unless-stopped`.
+
+`sed` here writes into a new file instead of editing the template in place: `sed
+-i` has a different syntax in BSD (macOS) and GNU (Linux), and a recipe with `-i`
+breaks exactly when it is carried over to another system.
+
+### Linux (systemd)
+
+The template is `tgagent.service` in the project root. The unit is a **user**
+one, root is not needed.
+
+```bash
+mkdir -p ~/.config/systemd/user
+sed -e "s|/home/YOUR_USER/.local/bin/uv|$(command -v uv)|g" \
+    -e "s|/home/YOUR_USER/tg-agent|$PWD|g" \
+    tgagent.service > ~/.config/systemd/user/tgagent.service
+systemctl --user daemon-reload
+systemctl --user enable --now tgagent
+```
+
+To check and to stop: `systemctl --user status tgagent`,
+`systemctl --user disable --now tgagent`. The unit writes its log into the same
+`data/daemon.log` as `tg daemon start`, so `uv run tg daemon logs` works the same
+way in both cases; in parallel everything is visible in
+`journalctl --user -u tgagent`.
+
+One caveat that macOS does not have: user units are stopped on session exit by
+default and do not start until the first login. For the daemon to live with the
+monitor off and to come up after a reboot without a login, you need
+`loginctl enable-linger $USER` — once.
+
+### Docker
+
+Neither of these is needed: the role of autostart is played by
+`restart: unless-stopped` in `docker-compose.yml`.
 
 ## Alert rules
 
@@ -588,6 +647,7 @@ cap.
 Accepted only from the `TG_ALERT_CHAT_ID` chat, the rest are logged and ignored.
 
 ```
+/start, /help  the list of commands
 /status        the agent's state
 /can [chat]    what is available and what is missing; with a chat — also the rights in it
 /unread        unread

@@ -40,20 +40,38 @@ def _onboarding(title: str, account: str | None = None) -> None:
 # ---------------------------------------------------------------- setup
 
 
-def cmd_setup(args) -> int:
-    _p("Telegram agent setup. Values are written to .env (chmod 600), "
-       "nothing leaves the machine.\n")
-    _p("1) api_id / api_hash: https://my.telegram.org → API development tools")
+def prompt_api_credentials(head: str = "api_id / api_hash") -> dict[str, str] | None:
+    """Ask for api_id/api_hash and check their shape. None — the input was wrong.
+
+    Separate from `cmd_setup`, because the `tg init` wizard asks the same
+    question: two copies of one question would drift apart in both the text and
+    the check.
+    """
+    _p(f"{head}: https://my.telegram.org → API development tools")
     api_id = input("   TG_API_ID: ").strip()
     api_hash = getpass("   TG_API_HASH (hidden input): ").strip()
     if not api_id.isdigit() or len(api_hash) < 20:
         _p("   api_id must be a number, api_hash a long string. Aborted.")
+        return None
+    return {"TG_API_ID": api_id, "TG_API_HASH": api_hash}
+
+
+def prompt_bot_token(head: str = "notification bot") -> str:
+    """Bot token, or an empty string if the bot was not wanted."""
+    _p(f"{head}: @BotFather → /newbot → copy the token")
+    return getpass("   TG_BOT_TOKEN (hidden input, Enter to skip): ").strip()
+
+
+def cmd_setup(args) -> int:
+    _p("Telegram agent setup. Values are written to .env (chmod 600), "
+       "nothing leaves the machine.\n")
+    creds = prompt_api_credentials("1) api_id / api_hash")
+    if not creds:
         return 1
 
-    _p("\n2) notification bot: @BotFather → /newbot → copy the token")
-    bot_token = getpass("   TG_BOT_TOKEN (hidden input, Enter to skip): ").strip()
+    bot_token = prompt_bot_token("\n2) notification bot")
 
-    values = {"TG_API_ID": api_id, "TG_API_HASH": api_hash, "TG_ALLOW_WRITE": "1"}
+    values = {**creds, "TG_ALLOW_WRITE": "1"}
     if bot_token:
         values["TG_BOT_TOKEN"] = bot_token
     config.write_env(values)
@@ -121,14 +139,19 @@ async def _login(args) -> int:
 
     client = TelegramClient(
         str(config.session_path(getattr(args, "account", None))), api_id, api_hash,
-        device_model="claude-tg-agent", system_version="macOS", app_version="tgagent 0.1",
+        **config.client_info(),
     )
     await client.connect()
+    # The `tg init` wizard prints the same digest itself, at the very end. Here it
+    # would be a second copy in the middle of the installation — hence the flag,
+    # not a separate function.
+    brief = getattr(args, "brief", False)
     if await client.is_user_authorized():
         me = await client.get_me()
         _p(f"Already signed in: {me.first_name} (@{me.username}). The session is in place.")
         await client.disconnect()
-        _onboarding("What you can do", getattr(args, "account", None))
+        if not brief:
+            _onboarding("What you can do", getattr(args, "account", None))
         return 0
 
     # Blocking the loop on the two lines below is the whole point of the step: this
@@ -156,8 +179,9 @@ async def _login(args) -> int:
     # signed in, no extra request is needed for it. The caps that follow from it
     # are shown by `tg capabilities` — those need a running daemon.
     _p("Telegram Premium: " + ("yes" if getattr(me, "premium", False) else "no"))
-    _p("Next: uv run tg daemon start")
-    _onboarding("What you can do", getattr(args, "account", None))
+    if not brief:
+        _p("Next: uv run tg daemon start")
+        _onboarding("What you can do", getattr(args, "account", None))
     return 0
 
 
@@ -178,7 +202,7 @@ def cmd_send_code(args) -> int:
         api_id, api_hash = config.api_credentials()
         client = TelegramClient(
             str(config.session_path(getattr(args, "account", None))), api_id, api_hash,
-            device_model="claude-tg-agent", system_version="macOS", app_version="tgagent 0.1",
+            **config.client_info(),
         )
         await client.connect()
         if await client.is_user_authorized():
@@ -213,7 +237,7 @@ def cmd_sign_in(args) -> int:
         api_id, api_hash = config.api_credentials()
         client = TelegramClient(
             str(config.session_path(getattr(args, "account", None))), api_id, api_hash,
-            device_model="claude-tg-agent", system_version="macOS", app_version="tgagent 0.1",
+            **config.client_info(),
         )
         await client.connect()
         try:
@@ -244,14 +268,14 @@ def cmd_password(args) -> int:
         from telethon import TelegramClient
 
         if not sys.stdin.isatty():
-            _p("A real terminal is required: open Terminal.app and run there\n"
-               "  cd ~/tg-agent && uv run tg password")
+            _p("A real terminal is required: open a terminal and run there\n"
+               f"  cd {config.ROOT} && uv run tg password")
             return 1
 
         api_id, api_hash = config.api_credentials()
         client = TelegramClient(
             str(config.session_path(getattr(args, "account", None))), api_id, api_hash,
-            device_model="claude-tg-agent", system_version="macOS", app_version="tgagent 0.1",
+            **config.client_info(),
         )
         await client.connect()
         if await client.is_user_authorized():
@@ -349,6 +373,14 @@ def cmd_daemon_start(args) -> int:
     if _daemon_pid():
         _p(f"The daemon is already running (pid {_daemon_pid()}).")
         return 0
+    # Checked before the start, not after: without keys and without a session the
+    # daemon is guaranteed to die, and without the check the person would wait 18
+    # seconds only to read a traceback at the end instead of one line with a
+    # command.
+    hint = config.setup_hint()
+    if hint:
+        _p(hint)
+        return 1
     config.ensure_dirs()
     config.SOCKET.unlink(missing_ok=True)
     with config.DAEMON_LOG.open("a") as logfh:
@@ -545,6 +577,24 @@ def cmd_call(args) -> int:
         return 1
 
 
+# ---------------------------------------------------------------- init / doctor
+
+
+def cmd_init(args) -> int:
+    """Setup wizard. Lives in `tgagent/install.py`, here only the entry into it:
+    it reuses the commands of this module, and the back dependency is held by a
+    deferred import, not by the order of lines."""
+    from . import install
+
+    return install.cmd_init(args)
+
+
+def cmd_doctor(args) -> int:
+    from . import install
+
+    return install.cmd_doctor(args)
+
+
 # ---------------------------------------------------------------- entry
 
 
@@ -560,6 +610,17 @@ def main() -> None:
         )
         return p
 
+    # The wizard comes first on purpose: in `tg --help` it has to be met before
+    # the steps it consists of — those are looked up separately, later.
+    with_account(
+        sub.add_parser("init", help="setup wizard: walk through everything up to a working state")
+    ).set_defaults(fn=cmd_init)
+    with_account(
+        sub.add_parser(
+            "doctor",
+            help="installation diagnostics: what is in place, what is broken, what to do",
+        )
+    ).set_defaults(fn=cmd_doctor)
     sub.add_parser("setup", help="enter api_id/api_hash and the bot token").set_defaults(
         fn=cmd_setup
     )

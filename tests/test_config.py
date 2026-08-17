@@ -226,3 +226,37 @@ def test_confirm_keys_have_defaults():
     """A CONFIRM_KEYS entry without a default would crash load_confirm with a KeyError."""
     for key in config.CONFIRM_KEYS:
         assert key in config.DEFAULT_RULES
+
+
+# ---------------------------------------------------------------- platform
+
+
+def test_installation_signature_comes_from_the_system_and_is_not_hardcoded():
+    """The line the installation is seen under in Settings → Devices.
+
+    The owner decides from that list which session to revoke. "macOS" on somebody
+    else's Linux is not cosmetics — it is a wrong signature in the list of the
+    account's accesses.
+    """
+    import platform
+
+    info = config.client_info()
+    assert info["system_version"].startswith(platform.system())
+    assert info["device_model"] == "claude-tg-agent"
+    assert info["app_version"].startswith("tgagent ")
+
+
+def test_no_module_builds_the_signature_itself():
+    """The signature is built only in `client_info`, there must be no copies of it.
+
+    The check is static, because otherwise the divergence shows up only on somebody
+    else's machine: the Telethon client is created in five places (the core and four
+    sign-in commands), and any of them could silently start introducing itself with a
+    hardcoded string.
+    """
+    for path in sorted((config.ROOT / "tgagent").glob("*.py")):
+        text = path.read_text()
+        for literal in ("system_version=", "device_model=", "app_version="):
+            assert literal not in text, (
+                f"{path.name}: the client signature is built outside config.client_info()"
+            )

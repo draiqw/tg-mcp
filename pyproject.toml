@@ -1,9 +1,14 @@
 [project]
 name = "tgagent"
 version = "0.1.0"
-description = "MCP server on top of a personal Telegram account: MTProto (Telethon), a session-owning daemon, 77 tools"
+description = "MCP server on top of a personal Telegram account: MTProto (Telethon), a session-owning daemon, 79 tools"
 readme = "README.md"
-requires-python = ">=3.13"
+# 3.11, not 3.13: the only thing holding the bar is `datetime.UTC` (the alias
+# appeared in 3.11). There is neither syntax nor functions from 3.12/3.13 in the
+# code, and the whole scaffolding — linter, tests, selfcheck — is green on 3.11.
+# Below 3.11 we would have to change code for the sake of a version that is going
+# out of support anyway.
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Roman Akramov" }]
@@ -27,7 +32,10 @@ classifiers = [
     "Natural Language :: Russian",
     # The daemon talks to the MCP server over a unix socket, so Windows is not claimed.
     "Operating System :: POSIX",
+    "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Communications :: Chat",
     "Topic :: Utilities",
@@ -78,7 +86,7 @@ packages = ["tgagent"]
 # breaking them, but everything longer than a hundred is genuinely unreadable and
 # gets fixed.
 line-length = 100
-target-version = "py313"
+target-version = "py311"
 extend-exclude = ["data"]
 
 # `ruff format` is deliberately not accepted as a mandatory step. Its single big
@@ -100,7 +108,7 @@ select = [
     "F",      # pyflakes: unused, undeclared, broken f-strings
     "I",      # import order and grouping
     "B",      # flake8-bugbear: typical traps such as a mutable default argument
-    "UP",     # pyupgrade: syntax per the declared requires-python = 3.13
+    "UP",     # pyupgrade: syntax per the declared requires-python = 3.11
     "ASYNC",  # blocking calls inside coroutines — a direct threat to the daemon's one loop
     "RUF100", # a noqa that no longer suppresses anything
 ]

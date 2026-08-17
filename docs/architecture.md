@@ -7,13 +7,14 @@ the code talks to Telegram. Everything else is transport and scaffolding:
 
 | File | Lines | Role |
 |---|---|---|
-| **`tgagent/core.py`** | 5181 | **core: all account operations, chat resolution, limits** |
-| `tgagent/daemon.py` | 2035 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
-| `tgagent/mcp_server.py` | 1558 | 79 tools, each one a single call to the daemon |
+| **`tgagent/core.py`** | 5179 | **core: all account operations, chat resolution, limits** |
+| `tgagent/daemon.py` | 2041 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
+| `tgagent/mcp_server.py` | 1575 | 79 tools, each one a single call to the daemon |
 | `tgagent/index.py` | 670 | local index of the correspondence: sqlite + FTS5, Russian morphology |
 | `tgagent/memory.py` | 234 | chat dossiers: file format, prompt, language-model call |
-| `tgagent/cli.py` | 620 | setup, sign-in, daemon control |
-| `tgagent/config.py` | 420 | paths, `.env`, rules, limits |
+| `tgagent/cli.py` | 681 | setup, sign-in, daemon control |
+| `tgagent/install.py` | 1038 | the `tg init` wizard and the `tg doctor` diagnostics: installation state, steps, registration in the client |
+| `tgagent/config.py` | 473 | paths, `.env`, rules, limits |
 | `tgagent/capabilities.py` | 764 | tables of "what a given tool needs", checks of the local setup, summary text, translation of Telegram errors |
 | `tgagent/alerts.py` | 138 | Bot API: alerts, commands, buttons under the agent's questions |
 
@@ -37,6 +38,16 @@ too, because you have to go to Telegram for them. The split is not cosmetic: wit
 it `tg setup` and `tg login` could not show the summary before the daemon's first
 run — and that is exactly the moment when the owner does not yet understand what he
 has got.
+
+`install.py` is scaffolding over scaffolding: it talks neither to Telegram nor to
+the daemon and does nothing by itself. It looks at the state of the installation and
+calls what already exists (`cli.prompt_api_credentials`, `cmd_login`, `cmd_link_bot`,
+`cmd_daemon_start`), so the three-layer rule does not apply to it — it adds no tools.
+One thing in it is essential: the state snapshot. `probe()` collects facts about the
+installation, `plan()` turns them into a list of steps marked "done", and `tg doctor`
+stands on the same snapshot. Hence the idempotence of the wizard (only what is
+missing is done) and the impossibility of a disagreement between "init considers the
+step done" and "doctor considers it undone": they share one function.
 
 The exception is four tools that live in the daemon rather than in the core: `tg_wait`
 waits for an incoming message, `tg_ask` — for the owner's answer, `tg_remind` defers a
