@@ -7,10 +7,10 @@ once without fighting over the session file.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import subprocess
 import sys
+import time
 from typing import Any
 
 import aiohttp
@@ -22,11 +22,15 @@ from . import config
 mcp = MCPServer("telegram")
 
 _DAEMON_HINT = (
-    "Telegram daemon is not running. Start it with: "
-    "`cd ~/tg-agent && uv run tg daemon start` "
-    "(or `uv run tg login` first if the session is not authorised yet)."
+    "The Telegram daemon is not answering — no tool works without it. "
+    "Start it: `cd ~/tg-agent && uv run tg daemon start` "
+    "(if the session has not been created yet, first `uv run tg login` — the owner "
+    "does that themselves)."
 )
 
+
+AUTOSTART_TRIES = 30
+AUTOSTART_PAUSE_SEC = 0.3
 
 # Which account serves this client session. None = the main one. Lives in the MCP
 # server process, that is, the switch only applies in the current Claude session.
@@ -50,7 +54,9 @@ async def call(method: str, **params: Any) -> Any:
     except (aiohttp.ClientConnectorError, FileNotFoundError, OSError) as exc:
         raise RuntimeError(f"{_DAEMON_HINT} ({exc})") from exc
     if not data.get("ok"):
-        raise RuntimeError(data.get("error", "unknown daemon error"))
+        raise RuntimeError(
+            data.get("error") or "the daemon answered with an error and no description"
+        )
     return data["result"]
 
 
@@ -67,12 +73,13 @@ def _try_autostart() -> None:
         )
     except Exception:
         return
-    for _ in range(30):
+    # The daemon comes up in a fraction of a second, but the first start also
+    # opens the session database; we wait up to nine seconds, after that the call
+    # honestly runs into _DAEMON_HINT.
+    for _ in range(AUTOSTART_TRIES):
         if config.SOCKET.exists():
             return
-        import time
-
-        time.sleep(0.3)
+        time.sleep(AUTOSTART_PAUSE_SEC)
 
 
 def j(value: Any) -> str:

@@ -1,0 +1,50 @@
+# Three checks that need neither network access to Telegram, nor an account, nor
+# the daemon: the linter, the tests and a static cross-check of the layers.
+#
+# scripts/smoke.py IS NOT HERE AND WILL NOT BE. This is not a forgotten step and
+# not an unfinished job: smoke calls the reading methods through a live daemon on
+# a real account, which means it needs a session file — access to a personal
+# Telegram without a password and without 2FA. Putting such a file (or the keys
+# from .env) into the secrets of a public repository is not an option, and
+# running smoke without them would not check anything anyway. If someone sets out
+# to "fix CI by adding smoke" — do not, it is not broken here.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # setup-uv does not publish floating major-version tags (since v8 the
+      # releases are immutable), so the version here is exact, not v10.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      # --locked: the lock must agree with pyproject.toml, otherwise it is an error,
+      # not a reason to recompute the dependencies on the fly. Python 3.13 uv will
+      # download itself — the version is set in requires-python.
+      - name: Dependencies
+        run: uv sync --locked
+
+      - name: Linter
+        run: uv run ruff check
+
+      # The tests do not go to the network and do not read .env: conftest points
+      # TG_ENV_FILE at a nonexistent file and TG_DATA_DIR at a temporary directory.
+      - name: Tests
+        run: uv run pytest -q
+
+      # Static analysis of the sources: no daemon needed, Telethon is not imported.
+      - name: Layer integrity
+        run: uv run python scripts/selfcheck.py

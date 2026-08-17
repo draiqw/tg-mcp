@@ -16,6 +16,11 @@ from . import config
 
 API = "https://api.telegram.org/bot{token}/{method}"
 
+# The Bot API rejects a message longer than 4096 characters. We cut with room to
+# spare: markup is added on top of the alert text, and trimming right at the
+# limit still fails sometimes.
+MAX_ALERT_LEN = 4000
+
 
 class BotChannel:
     def __init__(self, token: str | None = None, chat_id: str | None = None):
@@ -37,12 +42,17 @@ class BotChannel:
 
     async def call(self, method: str, **params: Any) -> dict:
         if not self.token:
-            raise RuntimeError("TG_BOT_TOKEN is not configured")
+            raise RuntimeError(
+                "TG_BOT_TOKEN is not set: the notification channel is not configured. "
+                "Create a bot with @BotFather and run `uv run tg setup`."
+            )
         sess = await self._http()
         async with sess.post(API.format(token=self.token, method=method), json=params) as resp:
             data = await resp.json()
         if not data.get("ok"):
-            raise RuntimeError(f"Bot API {method} failed: {data.get('description')}")
+            raise RuntimeError(
+                f"Bot API refused {method}: {data.get('description')}"
+            )
         return data["result"]
 
     async def me(self) -> dict:
@@ -51,18 +61,21 @@ class BotChannel:
     async def send(self, text: str, chat_id: str | None = None, silent: bool = False) -> dict:
         target = chat_id or self.chat_id
         if not target:
-            raise RuntimeError("TG_ALERT_CHAT_ID is not configured")
+            raise RuntimeError(
+                "TG_ALERT_CHAT_ID is not set: there is nowhere to send the notification. "
+                "Press Start in your bot and run `uv run tg link-bot`."
+            )
         return await self.call(
             "sendMessage",
             chat_id=target,
-            text=text[:4000],
+            text=text[:MAX_ALERT_LEN],
             parse_mode="HTML",
             disable_web_page_preview=True,
             disable_notification=silent,
         )
 
     async def poll(self, timeout: int = 50) -> list[dict]:
-        """Long-poll for messages sent *to* the bot (your commands)."""
+        """Long-poll for messages sent to the *bot* — those are the owner's commands."""
         params: dict[str, Any] = {
             "timeout": timeout,
             "allowed_updates": ["message", "callback_query"],

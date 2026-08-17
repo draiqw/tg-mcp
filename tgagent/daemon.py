@@ -18,7 +18,7 @@ import sys
 import time
 import traceback
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from aiohttp import web
@@ -26,8 +26,8 @@ from telethon import events, utils
 from telethon.tl import types
 
 from . import alerts, config
-from .core import GuardError, TelegramService, entity_name
-from .core import _day_start as day_start
+from .core import SAVED_ALIASES, GuardError, TelegramService, entity_name
+from .core import _parse_since as parse_since
 from .core import _parse_when as parse_when
 from .core import reaction_of as core_reaction_of
 
@@ -93,7 +93,11 @@ class Daemon:
 
     def append_event(self, event: dict) -> None:
         try:
-            if config.EVENTS_LOG.exists() and config.EVENTS_LOG.stat().st_size > MAX_EVENT_LOG_BYTES:
+            too_big = (
+                config.EVENTS_LOG.exists()
+                and config.EVENTS_LOG.stat().st_size > MAX_EVENT_LOG_BYTES
+            )
+            if too_big:
                 config.EVENTS_LOG.rename(config.EVENTS_LOG.with_suffix(".jsonl.1"))
             with config.EVENTS_LOG.open("a") as fh:
                 fh.write(json.dumps(event, ensure_ascii=False) + "\n")
@@ -101,15 +105,21 @@ class Daemon:
             log(f"event log failed: {exc}")
 
     def append_action(
-        self, method: str, params: dict, result: Any, error: str | None,
+        self, method: str, params: dict, error: str | None = None,
         account: str = config.MAIN_ACCOUNT, auto: str | None = None,
     ) -> None:
+        """One line in the action log: what the agent did and whether it worked.
+
+        The result of the call is deliberately not written here: for a read it can
+        run to a megabyte, and the log has to stay surveyable. What exactly went
+        out is visible from params.
+        """
         if method not in WRITE_METHODS and method not in AUDIT_ONLY:
             return
         if method == "remind" and params.get("list"):
             return   # remind has one entry for all of it; listing is a read, not an action
         record = {
-            "at": datetime.now(timezone.utc).isoformat(),
+            "at": datetime.now(UTC).isoformat(),
             "account": account,
             "action": method,
             "params": {k: v for k, v in params.items() if k != "text"},
@@ -261,10 +271,10 @@ class Daemon:
             if action == "folder" and "nothing to change" in str(exc):
                 self._auto_done.add(key)
                 return True
-            self.append_action(method, params, None, str(exc), svc.account, auto=name)
+            self.append_action(method, params, str(exc), svc.account, auto=name)
             log(f"auto[{name}]: {action} not carried out: {exc}")
             return False
-        self.append_action(method, params, None, None, svc.account, auto=name)
+        self.append_action(method, params, None, svc.account, auto=name)
         if action in AUTO_CHAT_LEVEL:
             self._auto_done.add(key)
         return True
@@ -342,7 +352,7 @@ class Daemon:
                 link = None
 
             ev = {
-                "at": datetime.now(timezone.utc).isoformat(),
+                "at": datetime.now(UTC).isoformat(),
                 "account": account,
                 "chat": entity_name(chat),
                 "chat_id": chat_id,
@@ -453,7 +463,7 @@ class Daemon:
         try:
             ev = await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
             return {"got": True, "waited_sec": round(time.time() - started, 1), "event": ev}
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {
                 "got": False,
                 "timeout_sec": timeout,
@@ -525,7 +535,7 @@ class Daemon:
             self.save_reminders()
 
     def _reminder_view(self, rem: dict) -> dict:
-        left = (parse_when(rem["at"]) - datetime.now(timezone.utc)).total_seconds()
+        left = (parse_when(rem["at"]) - datetime.now(UTC)).total_seconds()
         return {
             "id": rem["id"],
             "text": rem["text"],
@@ -549,7 +559,7 @@ class Daemon:
         """One tick: send everything that has come due."""
         if not self.reminders:
             return
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         due = [r for r in self.reminders if parse_when(r["at"]) <= now]
         if not due:
             return
@@ -611,7 +621,7 @@ class Daemon:
         if not self.bot.configured:
             raise RuntimeError("the bot is not configured: tg setup + tg link-bot")
         at = parse_when(when)
-        if at <= datetime.now(timezone.utc):
+        if at <= datetime.now(UTC):
             raise ValueError("a reminder can only be set for the future")
         if unless_reply and not chat:
             raise ValueError("unless_reply without chat is pointless: whose reply to wait for?")
@@ -619,10 +629,10 @@ class Daemon:
         rem = {
             "id": f"r{self._reminder_seq}",
             "text": str(text)[:1000],
-            "at": at.astimezone(timezone.utc).isoformat(),
+            "at": at.astimezone(UTC).isoformat(),
             "chat": str(chat) if chat is not None else None,
             "unless_reply": bool(unless_reply),
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
         self.reminders.append(rem)
         self.save_reminders()
@@ -670,9 +680,9 @@ class Daemon:
         """From which moment to count. Normally from the last actual send, otherwise
         from the previous slot; in any case no deeper than a day and a bit, so that
         a digest after a long downtime does not turn into a weekly report."""
-        floor = due.astimezone(timezone.utc) - timedelta(seconds=DIGEST_MAX_PERIOD_SEC)
+        floor = due.astimezone(UTC) - timedelta(seconds=DIGEST_MAX_PERIOD_SEC)
         earlier = [s for s in slots if s < due]
-        fallback = (earlier[-1] if earlier else due - timedelta(days=1)).astimezone(timezone.utc)
+        fallback = (earlier[-1] if earlier else due - timedelta(days=1)).astimezone(UTC)
         stored = self.digest_state.get("covered_since")
         start = None
         if stored:
@@ -837,12 +847,12 @@ class Daemon:
         since = self._digest_period_start(due, slots)
         body = await self.build_digest(since, due)
         if body is None:
-            self._close_digest_slot(key, due.astimezone(timezone.utc))
+            self._close_digest_slot(key, due.astimezone(UTC))
             log(f"digest: nothing happened in the period up to {key}, no digest sent")
             return
         await self.bot.send(body)
-        self.digest_state["last_sent_at"] = datetime.now(timezone.utc).isoformat()
-        self._close_digest_slot(key, due.astimezone(timezone.utc))
+        self.digest_state["last_sent_at"] = datetime.now(UTC).isoformat()
+        self._close_digest_slot(key, due.astimezone(UTC))
         log(f"digest: digest for slot {key} sent")
 
     async def digest_loop(self) -> None:
@@ -910,12 +920,12 @@ class Daemon:
             try:
                 res = await svc.memory(chat=chat_id, action="update")
                 self.memory_done.append(time.time())
-                self.append_action("memory", params, res, None, account=account, auto="memory_auto")
+                self.append_action("memory", params, account=account, auto="memory_auto")
                 log(f"memory: {res.get('chat')} updated, "
                     f"{res.get('new_messages')} new messages")
             except Exception as exc:
                 self.append_action(
-                    "memory", params, None, f"{type(exc).__name__}: {exc}",
+                    "memory", params, f"{type(exc).__name__}: {exc}",
                     account=account, auto="memory_auto",
                 )
                 log(f"memory: failed to update {chat_id}: {type(exc).__name__}: {exc}")
@@ -971,7 +981,7 @@ class Daemon:
         try:
             answer = await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
             return {"answered": True, **answer}
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {
                 "answered": False,
                 "timeout_sec": timeout,
@@ -1172,7 +1182,7 @@ class Daemon:
                 return   # the reaction was removed, not added
             chat_id = utils.get_peer_id(ent)
             ev = {
-                "at": datetime.now(timezone.utc).isoformat(),
+                "at": datetime.now(UTC).isoformat(),
                 "account": account,
                 "kind": "reaction",
                 "chat": entity_name(ent),
@@ -1206,7 +1216,7 @@ class Daemon:
             msg = event.message
             chat = await event.get_chat()
             ev = {
-                "at": datetime.now(timezone.utc).isoformat(),
+                "at": datetime.now(UTC).isoformat(),
                 "account": account,
                 "chat": entity_name(chat),
                 "chat_id": utils.get_peer_id(chat),
@@ -1326,10 +1336,8 @@ class Daemon:
                 self.paused = False
                 await self.bot.send("Alerts are active again.", chat_id)
             elif cmd == "rules":
-                await self.bot.send(
-                    "<pre>" + json.dumps(self.rules_view(), ensure_ascii=False, indent=2) + "</pre>",
-                    chat_id,
-                )
+                dump = json.dumps(self.rules_view(), ensure_ascii=False, indent=2)
+                await self.bot.send("<pre>" + dump + "</pre>", chat_id)
             elif cmd == "mute" and arg:
                 self.rules.setdefault("mute_chats", []).append(arg)
                 config.save_rules(self.rules)
@@ -1415,9 +1423,7 @@ class Daemon:
         # "today" is understood here the same way as in activity and export: the
         # owner has one word for "since the start of the day", and this log must not
         # be the single exception.
-        start = None
-        if since:
-            start = day_start() if str(since).lower() in ("today", "сегодня") else parse_when(since)
+        start = parse_since(since) if since else None
         needle = str(chat).strip().lower().lstrip("@") if chat is not None else None
         rows: list[dict] = []
         with config.ACTIONS_LOG.open() as fh:
@@ -1561,7 +1567,9 @@ class Daemon:
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "request body did not parse as JSON"}, status=400
+            )
         method = payload.get("method")
         params = dict(payload.get("params") or {})
         account = payload.get("account") or params.pop("account", None)
@@ -1571,7 +1579,10 @@ class Daemon:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         fn = self.dispatch_table(svc).get(method)
         if fn is None:
-            return web.json_response({"ok": False, "error": f"unknown method {method}"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": f"the daemon does not know the method {method!r}"},
+                status=404,
+            )
         try:
             if method in WRITE_METHODS:
                 # We ask before the call, not inside the core: a refusal must stay an
@@ -1579,15 +1590,17 @@ class Daemon:
                 # call that ran into a limit.
                 await self.confirm_write(svc, method, params)
             result = await fn(**params)
-            self.append_action(method, params, result, None, svc.account)
+            self.append_action(method, params, account=svc.account)
             return web.json_response({"ok": True, "result": result})
         except (GuardError, ValueError) as exc:
-            self.append_action(method, params, None, str(exc), svc.account)
+            self.append_action(method, params, str(exc), svc.account)
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         except Exception as exc:
             log(f"call {method} failed:\n{traceback.format_exc()}")
-            self.append_action(method, params, None, str(exc), svc.account)
-            return web.json_response({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, status=500)
+            self.append_action(method, params, str(exc), svc.account)
+            return web.json_response(
+                {"ok": False, "error": f"{type(exc).__name__}: {exc}"}, status=500
+            )
 
     async def run(self) -> None:
         config.ensure_dirs()
@@ -1718,7 +1731,6 @@ CONFIRM_CONDITIONAL = {
 
 CONFIRM_PREVIEW_LEN = 350
 CONFIRM_YES = {"allow", "yes", "y", "ok", "okay", "+", "go", "go ahead", "do it"}
-SAVED_ALIASES = {"me", "self", "saved", "saved messages", "избранное"}
 
 HELP_TEXT = (
     "<b>Telegram agent</b>\n"

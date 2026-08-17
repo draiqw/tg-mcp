@@ -1,5 +1,7 @@
 # Secrets and account access — never in git
 .env
+.env.*
+!.env.example
 data/
 *.session
 *.session-journal
@@ -11,6 +13,10 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Development tool caches
+.pytest_cache/
+.ruff_cache/
 
 # macOS
 .DS_Store

@@ -1,7 +1,37 @@
 [project]
 name = "tgagent"
 version = "0.1.0"
+description = "MCP server on top of a personal Telegram account: MTProto (Telethon), a session-owning daemon, 77 tools"
+readme = "README.md"
 requires-python = ">=3.13"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Roman Akramov" }]
+keywords = [
+    "telegram",
+    "mcp",
+    "model-context-protocol",
+    "telethon",
+    "mtproto",
+    "claude",
+    "claude-code",
+    "agent",
+]
+# The licence is declared with the `license` field per PEP 639, so the
+# `License :: OSI Approved` classifier is deliberately absent here: it is
+# forbidden together with an SPDX string.
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Natural Language :: Russian",
+    # The daemon talks to the MCP server over a unix socket, so Windows is not claimed.
+    "Operating System :: POSIX",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Chat",
+    "Topic :: Utilities",
+]
 dependencies = [
     "aiohttp>=3.14.3",
     "mcp>=2.0.0",
@@ -16,6 +46,20 @@ local-whisper = [
     "faster-whisper>=1.2.1",
 ]
 
+[dependency-groups]
+# Development only: does not go into the image or into the package install.
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=1.0",
+    "ruff>=0.16",
+]
+
+[project.urls]
+Homepage = "https://github.com/draiqw/telegram-mcp"
+Repository = "https://github.com/draiqw/telegram-mcp"
+Documentation = "https://github.com/draiqw/telegram-mcp/blob/main/docs/tools.md"
+Issues = "https://github.com/draiqw/telegram-mcp/issues"
+
 [project.scripts]
 tg = "tgagent.cli:main"
 tg-mcp = "tgagent.mcp_server:main"
@@ -26,3 +70,75 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["tgagent"]
+
+[tool.ruff]
+# The code is typed to roughly 90 columns: the 99th percentile of line length is
+# 91 characters. The limit is set with room to spare at 100, so that a dozen long
+# signatures and string literals do not have to be broken up for the sake of
+# breaking them, but everything longer than a hundred is genuinely unreadable and
+# gets fixed.
+line-length = 100
+target-version = "py313"
+extend-exclude = ["data"]
+
+# `ruff format` is deliberately not accepted as a mandatory step. Its single big
+# complaint about this code is the trailing comments aligned into a column in the
+# tables of rules, of the dispatcher and of the settings: it squeezes them down to
+# one space and rewrites about 1900 lines out of 12500 that way. The readability
+# of the tables drops, and the change history drowns in noise, so the formatter is
+# only advisory here (`uvx ruff format --diff`), and the norm is the output of
+# `ruff check`.
+
+[tool.ruff.lint]
+# The set is assembled for this project: we catch errors and dangerous
+# constructs, but do not impose a style. What is deliberately absent here is in
+# the comment below the list: it is as much a part of the decision as what is
+# enabled.
+select = [
+    "E",      # pycodestyle: errors — comparisons to None, bare except, line length
+    "W",      # pycodestyle: trailing whitespace and other invisible junk in diffs
+    "F",      # pyflakes: unused, undeclared, broken f-strings
+    "I",      # import order and grouping
+    "B",      # flake8-bugbear: typical traps such as a mutable default argument
+    "UP",     # pyupgrade: syntax per the declared requires-python = 3.13
+    "ASYNC",  # blocking calls inside coroutines — a direct threat to the daemon's one loop
+    "RUF100", # a noqa that no longer suppresses anything
+]
+
+# Deliberately NOT enabled (listed so that "turn everything on" does not look
+# like an improvement later):
+#   BLE001, S110, S112, TRY300/TRY400 — "do not catch a broad exception",
+#     "except: pass". Here that is by design, not by sloppiness: the watcher, the
+#     event handlers and the daemon's background tasks have to survive any error
+#     on a single message, otherwise the session owner dies as a whole and
+#     Telegram is left without a client. The places where an exception really is
+#     swallowed for nothing are found by eye, not by a rule with a hundred false
+#     positives.
+#   RUF001-RUF003 — "ambiguous Unicode characters". The project's comments and
+#     docstrings were written in Russian, and the rule fired 600 times on
+#     Cyrillic.
+#   SIM, PERF, ANN, D — matters of taste and rewriting working code; the cleanup
+#     is meant as scaffolding, not as a refactoring.
+ignore = [
+    # ASYNC240 demands trio.Path/anyio.Path instead of pathlib inside coroutines.
+    # Here it is asyncio, where there is no async Path at all, and the filesystem
+    # calls are mkdir, stat, reading a small json. The rule describes someone
+    # else's framework.
+    "ASYNC240",
+    # ASYNC109 forbids a timeout parameter on a coroutine, suggesting the timeout
+    # be set from the outside. Here timeout is part of the daemon's RPC protocol
+    # and of the MCP tool signatures: the caller lives in another process and
+    # cannot set it from the outside.
+    "ASYNC109",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["tgagent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# There are not many async tests here, but there are some in every file about the
+# daemon; auto saves putting a marker on each of them.
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["error::DeprecationWarning:tgagent.*"]

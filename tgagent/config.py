@@ -38,7 +38,8 @@ DEFAULT_RULES = {
     "mute_chats": [],               # chat ids/titles: never alert
     "ignore_bots": True,
     "transcribe_voice": True,       # voice notes and video circles — text straight into the alert
-    "alert_on_reaction": False,     # reactions to your messages: always in the event log, in the alert — on demand
+    # Reactions to your messages: they always land in the event log, in the alert — on demand.
+    "alert_on_reaction": False,
     "min_interval_sec": 3,          # per-chat alert throttle
     "quiet_hours": None,            # e.g. [23, 8] -> no alerts 23:00..08:00
     # Digest on a schedule: ["09:00", "20:00"] in local time. An empty list means

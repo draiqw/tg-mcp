@@ -12,15 +12,17 @@ import json
 import re
 import time
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import aiohttp
 from telethon import TelegramClient, functions, types, utils
 from telethon.errors import FloodWaitError
 from telethon.helpers import add_surrogate, del_surrogate
 
-from . import config, memory as memory_mod
+from . import config
+from . import memory as memory_mod
 from .index import MessageIndex
 
 
@@ -28,8 +30,11 @@ class GuardError(RuntimeError):
     """Raised when a write action hits a safety limit."""
 
 
+HOUR_SEC = 3600
+
+
 class RateGuard:
-    """Rolling-hour limits so a runaway loop cannot spam or wipe chats."""
+    """Sliding hour: a runaway loop must not spray spam or wipe out a chat."""
 
     def __init__(self, limits: dict[str, int]):
         self.limits = limits
@@ -37,7 +42,7 @@ class RateGuard:
         self.deletes: deque[float] = deque()
 
     def _trim(self) -> None:
-        cutoff = time.time() - 3600
+        cutoff = time.time() - HOUR_SEC
         while self.sends and self.sends[0][0] < cutoff:
             self.sends.popleft()
         while self.deletes and self.deletes[0] < cutoff:
@@ -45,16 +50,19 @@ class RateGuard:
 
     def check_send(self, chat_key: str) -> None:
         self._trim()
-        if len(self.sends) >= self.limits["max_sends_per_hour"]:
+        cap = self.limits["max_sends_per_hour"]
+        if len(self.sends) >= cap:
             raise GuardError(
-                f"Send limit reached ({self.limits['max_sends_per_hour']}/hour). "
-                "Raise LIMITS in config.py if this is intentional."
+                f"Send guard: {cap} messages in the last hour already, that is the "
+                "cap. Wait, or raise max_sends_per_hour in LIMITS "
+                "(tgagent/config.py)."
             )
         chats = {c for _, c in self.sends} | {chat_key}
         if len(chats) > self.limits["max_distinct_chats_per_hour"]:
             raise GuardError(
-                f"Refusing to message a {len(chats)}th distinct chat this hour "
-                "(mass-messaging guard). Do it manually or raise the limit."
+                f"Mass-mailing guard: this is distinct chat number {len(chats)} "
+                f"within the hour, the cap is {self.limits['max_distinct_chats_per_hour']}. "
+                "Send it by hand or raise max_distinct_chats_per_hour in LIMITS."
             )
 
     def record_send(self, chat_key: str) -> None:
@@ -62,8 +70,13 @@ class RateGuard:
 
     def check_delete(self, count: int) -> None:
         self._trim()
-        if len(self.deletes) + count > self.limits["max_deletes_per_hour"]:
-            raise GuardError("Delete limit reached (50/hour).")
+        cap = self.limits["max_deletes_per_hour"]
+        if len(self.deletes) + count > cap:
+            raise GuardError(
+                f"Delete guard: {cap} messages may be wiped per hour, "
+                f"{len(self.deletes)} are gone already and {count} more are asked for. "
+                "Deleting is irreversible — split it up or raise max_deletes_per_hour."
+            )
 
     def record_delete(self, count: int) -> None:
         now = time.time()
@@ -72,7 +85,7 @@ class RateGuard:
 
 
 def _iso(dt: datetime | None) -> str | None:
-    return dt.astimezone(timezone.utc).isoformat() if dt else None
+    return dt.astimezone(UTC).isoformat() if dt else None
 
 
 def _media_kind(msg) -> str | None:
@@ -123,13 +136,13 @@ MEDIA_FILTERS = {
     "contact": types.InputMessagesFilterContacts,
 }
 
+MEMORY_ACTIONS = ("show", "update", "list", "drop")
+
 # Indexing is limited in time and in volume on purpose. The MCP client waits for
 # the daemon no longer than 120 seconds, so the call stops earlier by itself and
 # says plainly that it did not read everything: sync is incremental, the next
 # call continues from the same boundary. A batch of 300 messages is the size of
 # one sqlite commit: a sync interrupted midway does not lose what already landed.
-MEMORY_ACTIONS = ("show", "update", "list", "drop")
-
 INDEX_BUDGET_SEC = 100.0
 INDEX_DEFAULT_LIMIT = 2000
 INDEX_MAX_LIMIT = 20000
@@ -138,6 +151,77 @@ INDEX_BATCH = 300
 # language-blind on purpose: these are typed, not read, and a keyboard is not
 # something the code gets to choose.
 INDEX_SELF = ("me", "self", "you", "my", "mine", "myself", "я", "себя", "свои", "мои")
+
+# How the owner names Saved Messages. One list for the whole project: the daemon
+# checks its confirmation allowlist against it, the core checks the chat
+# argument, and the two must not drift apart. Localised names stay in the list
+# for the same reason as in INDEX_SELF — this is input, not output.
+SAVED_ALIASES = ("me", "self", "saved", "saved messages", "favorites",
+                 "избранное")
+SAVED_TITLE = "Saved Messages"
+
+# How many chats and messages are taken per call. The limits are not Telegram's
+# but ours: the whole batch goes into the model context, and "dump every chat"
+# in a single call is not work, it is a way to blow the call up on timeout.
+MAX_CHATS_PER_CALL = 25
+MAX_FILES_PER_CALL = 50
+MAX_AUDIO_PER_CALL = 20
+MAX_TRANSLATE_PER_CALL = 20
+MAX_SUMMARIZE_PER_CALL = 10
+
+# How many matching chats to show in an ambiguity error: a longer list no longer
+# helps to choose, it only inflates the answer.
+MATCH_PREVIEW = 8
+
+# Telegram trims a folder title to 12 characters itself; we trim in advance so
+# that the answer holds the same thing the owner sees in the app.
+FOLDER_TITLE_LEN = 12
+
+MB = 1024 * 1024
+
+# Extensions the model can look at as a picture. For everything else (video,
+# archives) there is nothing to show it with — the file has to be downloaded.
+IMAGE_MIME = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+
+def media_kinds() -> str:
+    """The list of kinds for an error message — the same one in every method."""
+    return ", ".join(sorted(MEDIA_FILTERS))
+
+
+def tg_error_text(exc: Exception) -> str:
+    """The Telethon error text without the "(caused by ...)" tail.
+
+    Telethon appends the name of the request that raised it to the message. That
+    explains nothing to the owner or to the model, and doubles the line length.
+    """
+    return str(exc).split(" (caused")[0]
+
+
+def _assert_text_len(text: str, what: str) -> None:
+    """Telegram has one length limit for all messages; we name it with the number
+    from LIMITS, not a constant in the text — otherwise editing the limit would
+    make the error lie."""
+    cap = config.LIMITS["max_text_len"]
+    if len(text) > cap:
+        raise GuardError(
+            f"{what} is {len(text)} characters long, the Telegram limit is {cap}. "
+            "Split it up and send it in turns."
+        )
+
+
+def _flood_text(exc: FloodWaitError) -> str:
+    """Flood-wait is not a refusal but a "too often": wait as long as told."""
+    return (
+        f"Telegram asks you to wait {exc.seconds} s: too many requests in a row. "
+        "This is not a refusal — retry after a pause."
+    )
 
 
 def _user_status(user) -> str | None:
@@ -316,12 +400,12 @@ def _day_start() -> datetime:
     local_midnight = datetime.now().astimezone().replace(
         hour=0, minute=0, second=0, microsecond=0
     )
-    return local_midnight.astimezone(timezone.utc)
+    return local_midnight.astimezone(UTC)
 
 
 def _utc_day(dt: datetime | None) -> str | None:
     """The day in UTC as YYYY-MM-DD: the server cuts the chat calendar by UTC days."""
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d") if dt else None
+    return dt.astimezone(UTC).strftime("%Y-%m-%d") if dt else None
 
 
 def _parse_when(when: Any) -> datetime:
@@ -331,7 +415,7 @@ def _parse_when(when: Any) -> datetime:
     last 6 hours"), the plus where it looks into the future (scheduled sending).
     """
     if isinstance(when, (int, float)):
-        return datetime.fromtimestamp(float(when), timezone.utc)
+        return datetime.fromtimestamp(float(when), UTC)
     raw = str(when).strip()
     if raw[:1] in ("+", "-"):
         unit = raw[-1].lower()
@@ -342,7 +426,7 @@ def _parse_when(when: Any) -> datetime:
             mult = None
         if not mult:
             raise ValueError("Relative time is written as +30m, -6h, +3d")
-        return datetime.now(timezone.utc) + timedelta(seconds=amount * mult)
+        return datetime.now(UTC) + timedelta(seconds=amount * mult)
     try:
         dt = datetime.fromisoformat(raw)
     except ValueError as exc:
@@ -351,6 +435,19 @@ def _parse_when(when: Any) -> datetime:
         ) from exc
     # A naive time is read as local — a person writes "at 9 am" about themselves.
     return dt if dt.tzinfo else dt.astimezone()
+
+
+# Also input, in any language the owner might type it in.
+TODAY_WORDS = ("today", "сегодня")
+
+
+def _parse_since(value: Any) -> datetime:
+    """The start of a period: "today" is local midnight, the rest goes to _parse_when.
+
+    Separate from _parse_when because "today" only makes sense on the lower
+    boundary: on the upper one it would be a stretch of zero length.
+    """
+    return _day_start() if str(value).lower() in TODAY_WORDS else _parse_when(value)
 
 
 class TelegramService:
@@ -382,7 +479,9 @@ class TelegramService:
         await self.client.connect()
         if not await self.client.is_user_authorized():
             raise RuntimeError(
-                "Session is not authorized. Run `uv run tg login` in your terminal."
+                "The session is not authorised: the sign-in code is entered by the "
+                "owner, the agent never sees it. Run `uv run tg login` in your own "
+                "terminal."
             )
         self.me = await self.client.get_me()
         return self.whoami_dict()
@@ -404,22 +503,22 @@ class TelegramService:
     # ---------- entity resolution ----------
 
     async def resolve(self, chat: Any):
-        """Accept an id, @username, t.me link, 'me'/'saved', or a chat title."""
+        """Id, @username, a t.me link, 'me'/'saved' or a chat title."""
         if chat is None:
-            raise ValueError("chat is required")
+            raise ValueError("chat is required: id, @username, a t.me link or a chat title")
         if isinstance(chat, int):
             return await self.client.get_entity(chat)
 
         raw = str(chat).strip()
         low = raw.lower()
-        if low in ("me", "self", "saved", "saved messages", "избранное"):
+        if low in SAVED_ALIASES:
             return "me"
         if raw.lstrip("-").isdigit():
             return await self.client.get_entity(int(raw))
         if raw.startswith("@") or "t.me/" in low or low.startswith("+"):
             return await self.client.get_entity(raw)
 
-        # Fall back to a title match over the dialog list.
+        # Last attempt — a search by title through the dialog list.
         dialogs = await self._dialogs_index()
         exact = [d for d in dialogs if d["name"].lower() == low]
         pool = exact or [d for d in dialogs if low in d["name"].lower()]
@@ -427,11 +526,15 @@ class TelegramService:
             try:
                 return await self.client.get_entity(raw)
             except Exception as exc:
-                raise ValueError(f"No chat matching {raw!r} ({exc})") from exc
+                raise ValueError(
+                    f"Chat {raw!r} is neither in the dialog list nor known to Telegram "
+                    f"({tg_error_text(exc)}). Check the title or pass an id."
+                ) from exc
         if len(pool) > 1 and not exact:
-            names = ", ".join(f"{d['name']} (id {d['id']})" for d in pool[:8])
+            names = ", ".join(f"{d['name']} (id {d['id']})" for d in pool[:MATCH_PREVIEW])
             raise ValueError(
-                f"{len(pool)} chats match {raw!r}: {names}. Pass the exact id."
+                f"{raw!r} matches {len(pool)} chats — {names}. "
+                "Pass the exact id, otherwise there is no guessing which one was meant."
             )
         return await self.client.get_entity(pool[0]["id"])
 
@@ -447,6 +550,12 @@ class TelegramService:
         self._dialog_cache = index
         self._dialog_cache_at = time.time()
         return index
+
+    async def chat_title(self, ent) -> str:
+        """The chat title for the answer. Saved Messages is the only chat without
+        an entity: resolve() returns the string "me" for it, and get_entity will
+        not name it."""
+        return SAVED_TITLE if ent == "me" else entity_name(await self.client.get_entity(ent))
 
     # ---------- serialisation ----------
 
@@ -554,14 +663,17 @@ class TelegramService:
         if kind == "inactive":
             res = await self.client(functions.channels.GetInactiveChannelsRequest())
             rows = []
-            for ch, ts in zip(res.chats, res.dates):
+            # strict=False rather than True: the lists of chats and dates come
+            # from the server, and if it ever sends them at different lengths, it
+            # is better to show as many as matched than to fail the whole call.
+            for ch, ts in zip(res.chats, res.dates, strict=False):
                 rows.append(
                     {
                         "id": utils.get_peer_id(ch),
                         "name": entity_name(ch),
                         "type": "channel" if getattr(ch, "broadcast", False) else "group",
                         "members": getattr(ch, "participants_count", None),
-                        "last_activity": _iso(datetime.fromtimestamp(ts, timezone.utc)),
+                        "last_activity": _iso(datetime.fromtimestamp(ts, UTC)),
                     }
                 )
             rows.sort(key=lambda r: r["last_activity"] or "")
@@ -725,7 +837,7 @@ class TelegramService:
         """
         if direction not in self.PENDING_DIRECTIONS:
             raise ValueError(f"direction: {', '.join(self.PENDING_DIRECTIONS)}")
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         me_id = getattr(self.me, "id", None)
         rows: list[dict] = []
         async for d in self.client.iter_dialogs(limit=1000, archived=archived):
@@ -800,7 +912,7 @@ class TelegramService:
             if ent != "me":
                 raise ValueError('saved_from works only with chat="me" (Saved Messages)')
             return await self.saved_history(saved_from, limit=limit, before_id=before_id)
-        name = entity_name(await self.client.get_entity(ent)) if ent != "me" else "Saved Messages"
+        name = await self.chat_title(ent)
         kwargs: dict[str, Any] = {"limit": limit}
         if before_id:
             kwargs["offset_id"] = before_id
@@ -914,7 +1026,7 @@ class TelegramService:
                 pass
             msgs.append(self.message_dict(m))
         return {
-            "chat": "Saved Messages",
+            "chat": SAVED_TITLE,
             "saved_from": entity_name(await self.client.get_entity(ent)),
             "total": getattr(res, "count", None) or len(msgs),
             "messages": list(reversed(msgs)),
@@ -976,15 +1088,17 @@ class TelegramService:
         kwargs: dict[str, Any] = {"search": query, "limit": limit}
         if kind:
             if kind not in MEDIA_FILTERS:
-                raise ValueError(f"kind must be one of: {', '.join(sorted(MEDIA_FILTERS))}")
+                raise ValueError(f"kind is one of: {media_kinds()}")
             kwargs["filter"] = MEDIA_FILTERS[kind]
         if until:
             kwargs["offset_date"] = _parse_when(until)
         since_dt = _parse_when(since) if since else None
 
         if tag:
-            if ent not in ("me", None) and utils.get_peer_id(await self.client.get_entity(ent)) != (await self.client.get_me()).id:
-                raise ValueError("tags live only in Saved Messages: chat=\"me\"")
+            if ent not in ("me", None):
+                peer_id = utils.get_peer_id(await self.client.get_entity(ent))
+                if peer_id != (await self.client.get_me()).id:
+                    raise ValueError('tags live only in Saved Messages: chat="me"')
             tags = await self.saved_tags()
             needle = str(tag).strip().lower()
             match = next(
@@ -1012,7 +1126,8 @@ class TelegramService:
             me = await self.client.get_input_entity("me")
             res = await self.client(
                 functions.messages.SearchRequest(
-                    peer=me, q=query or "", filter=kwargs.get("filter") or types.InputMessagesFilterEmpty(),
+                    peer=me, q=query or "",
+                    filter=kwargs.get("filter") or types.InputMessagesFilterEmpty(),
                     min_date=None, max_date=None, offset_id=0, add_offset=0,
                     limit=limit, max_id=0, min_id=0, hash=0, saved_reaction=[reaction],
                 )
@@ -1056,11 +1171,7 @@ class TelegramService:
         def stamp(value: str | None) -> int | None:
             if not value:
                 return None
-            dt = (
-                _day_start() if str(value).lower() in ("today", "сегодня")
-                else _parse_when(value)
-            )
-            return int(dt.timestamp())
+            return int(_parse_since(value).timestamp())
 
         res = store.search(
             query=query, chat_ids=chat_ids, author=author, mine=mine,
@@ -1116,9 +1227,7 @@ class TelegramService:
                 except Exception:
                     continue
                 for m in getattr(res, "messages", []):
-                    row = self.message_dict(m, d["name"])
-                    row["reactions"] = row.get("reactions")
-                    rows.append(row)
+                    rows.append(self.message_dict(m, d["name"]))
                 if len(rows) >= limit:
                     break
             return rows[:limit]
@@ -1232,7 +1341,9 @@ class TelegramService:
             out["note"] = "Telegram hands out the full list of similar channels only with Premium"
         return out
 
-    async def participants(self, chat: Any, limit: int = 50, query: str | None = None) -> list[dict]:
+    async def participants(
+        self, chat: Any, limit: int = 50, query: str | None = None
+    ) -> list[dict]:
         """Chat participants with DM links and metadata."""
         ent = await self.resolve(chat)
         rows = []
@@ -1260,7 +1371,10 @@ class TelegramService:
     async def contacts(
         self, query: str | None = None, limit: int = 50, kind: str = "all"
     ) -> list[dict]:
-        """Contacts and slices over them: birthdays, whom you write to most often, who is online, the blocklist."""
+        """Contacts and slices over them.
+
+        Birthdays, whom you write to most often, who is online now, the blocklist.
+        """
         if kind not in self.CONTACT_KINDS:
             raise ValueError(f"kind: {', '.join(self.CONTACT_KINDS)}")
 
@@ -1363,8 +1477,8 @@ class TelegramService:
         """Read several chats at once in a single call."""
         if not isinstance(chats, list) or not chats:
             raise ValueError("chats must be a non-empty list")
-        if len(chats) > 25:
-            raise ValueError("no more than 25 chats at a time")
+        if len(chats) > MAX_CHATS_PER_CALL:
+            raise ValueError(f"no more than {MAX_CHATS_PER_CALL} chats at a time")
         out = []
         for chat in chats:
             try:
@@ -1378,11 +1492,9 @@ class TelegramService:
     ) -> dict:
         """Attachment tabs, as in Telegram: photos, video, files, music, voice, links."""
         if kind not in MEDIA_FILTERS:
-            raise ValueError(
-                f"kind must be one of: {', '.join(sorted(MEDIA_FILTERS))}"
-            )
+            raise ValueError(f"kind is one of: {media_kinds()}")
         ent = await self.resolve(chat)
-        name = entity_name(await self.client.get_entity(ent)) if ent != "me" else "Saved Messages"
+        name = await self.chat_title(ent)
         kwargs: dict[str, Any] = {"limit": limit, "filter": MEDIA_FILTERS[kind]}
         if before_id:
             kwargs["offset_id"] = before_id
@@ -1422,8 +1534,8 @@ class TelegramService:
     ) -> dict:
         """Download several attachments at once (take the ids from media)."""
         ids = [int(i) for i in message_ids]
-        if len(ids) > 50:
-            raise ValueError("no more than 50 files at a time")
+        if len(ids) > MAX_FILES_PER_CALL:
+            raise ValueError(f"no more than {MAX_FILES_PER_CALL} files at a time")
         ent = await self.resolve(chat)
         target = Path(dest).expanduser() if dest else config.DOWNLOADS
         target.mkdir(parents=True, exist_ok=True)
@@ -1453,7 +1565,10 @@ class TelegramService:
         ent = await self.resolve(chat)
         msg = await self.client.get_messages(ent, ids=message_id)
         if not msg or not msg.media:
-            raise ValueError("Message has no downloadable media")
+            raise ValueError(
+                f"Message {message_id} carries no attachment — there is nothing to "
+                'download. What the chat has, media(chat=..., kind="media") will show.'
+            )
         target = Path(dest).expanduser() if dest else config.DOWNLOADS
         path = await self.client.download_media(msg, file=str(target))
         return {"path": path, "bytes": Path(path).stat().st_size if path else 0}
@@ -1516,7 +1631,7 @@ class TelegramService:
                 out["read_at"] = _iso(res.date)
             except Exception as exc:
                 out["read_at"] = None
-                out["read_at_note"] = str(exc).split(" (caused")[0]
+                out["read_at_note"] = tg_error_text(exc)
 
         if context:
             before = await self.client.get_messages(ent, limit=context, offset_id=mid)
@@ -1570,7 +1685,10 @@ class TelegramService:
         if not tally:
             # Until you vote, the server sends no interim results of a closed
             # poll at all — that is not a bug, that is a Telegram rule.
-            out["note"] = "results are not visible yet: the poll hides them until you vote or until it closes"
+            out["note"] = (
+                "results are not visible yet: the poll hides them until you vote or "
+                "until it closes"
+            )
 
         if not poll.public_voters:
             out["note"] = "the poll is anonymous: no by-name list exists, only counters"
@@ -1586,7 +1704,7 @@ class TelegramService:
                 # hands out neither counters nor voters.
                 out["note"] = "the results are hidden until you vote yourself"
             else:
-                out["votes_error"] = str(exc).split(" (caused")[0]
+                out["votes_error"] = tg_error_text(exc)
             return out
         names = {
             utils.get_peer_id(e): entity_name(e)
@@ -1598,7 +1716,9 @@ class TelegramService:
             # In a multiple choice the vote arrives as a list of options at once.
             for opt in getattr(v, "options", None) or [getattr(v, "option", b"")]:
                 by.setdefault(opt, []).append(who)
-        for row, opt in zip(rows, order):
+        # strict=True is safe: rows was built by walking the same order above,
+        # the lengths match by construction, and a mismatch would be our own bug.
+        for row, opt in zip(rows, order, strict=True):
             if by.get(opt):
                 row["by"] = by[opt]
         out["voters_listed"] = len(res.votes)
@@ -1735,7 +1855,7 @@ class TelegramService:
                     "is no account at all, or the person forbade being found by number. "
                     "There is nothing more to learn."
                 ) from exc
-            raise ValueError(f"Number {phone}: {str(exc).split(' (caused')[0]}") from exc
+            raise ValueError(f"Number {phone}: {tg_error_text(exc)}") from exc
 
         ents = {utils.get_peer_id(e): e for e in list(res.users) + list(res.chats)}
         ent = ents.get(utils.get_peer_id(res.peer))
@@ -1957,7 +2077,7 @@ class TelegramService:
             return await self._chat_calendar(chat, since, until, limit_days, kind)
         if since is None:
             since = "today"
-        start = _day_start() if str(since).lower() in ("today", "сегодня") else _parse_when(since)
+        start = _parse_since(since)
         end = _parse_when(until) if until else None
         rows: list[dict] = []
         scanned = 0
@@ -2047,14 +2167,10 @@ class TelegramService:
         target = await self.resolve(chat)
         ent = await self.client.get_input_entity(target)
         who = await self.client.get_entity(target)
-        name = "Saved Messages" if target == "me" else entity_name(who)
+        name = SAVED_TITLE if target == "me" else entity_name(who)
         start = None
         if since is not None:
-            start = (
-                _day_start()
-                if str(since).lower() in ("today", "сегодня")
-                else _parse_when(since)
-            )
+            start = _parse_since(since)
         end = _parse_when(until) if until else None
         limit_days = max(1, min(int(limit_days), 1000))
         # Boundaries are compared by day: a period in the answer is a whole day,
@@ -2064,10 +2180,7 @@ class TelegramService:
 
         if kind:
             if kind not in MEDIA_FILTERS:
-                raise ValueError(
-                    "kind for a chat calendar is one of: "
-                    + ", ".join(sorted(MEDIA_FILTERS))
-                )
+                raise ValueError(f"kind for a chat calendar is one of: {media_kinds()}")
             rows, total, exact, step = await self._calendar_days(
                 ent, MEDIA_FILTERS[kind], start_day, end_day, limit_days, end
             )
@@ -2204,6 +2317,9 @@ class TelegramService:
             row["max_id"] = max(row["max_id"], p.msg_id)
         return [by_day[d] for d in order], total, exact, step
 
+    EXPORT_FORMATS = {"json": "json", "markdown": "md", "text": "txt"}
+    EXPORT_MAX_MESSAGES = 5000
+
     async def export(
         self,
         chat: Any = None,
@@ -2222,50 +2338,82 @@ class TelegramService:
         `media=True` additionally downloads attachments and puts the file path
         and a link to the message itself into every message.
         """
-        if format not in ("json", "markdown", "text"):
+        if format not in self.EXPORT_FORMATS:
             raise ValueError("format: json, markdown or text")
         if chats:
-            targets = list(chats)
-            if len(targets) > 25:
-                raise ValueError("no more than 25 chats at a time")
-            out = []
-            for one in targets:
-                try:
-                    out.append(
-                        await self.export(
-                            chat=one, limit=limit, format=format, dest=dest,
-                            since=since, until=until, media=media,
-                            media_max_mb=media_max_mb,
-                        )
-                    )
-                except Exception as exc:
-                    out.append({"chat": str(one), "error": f"{type(exc).__name__}: {exc}"})
-            return {
-                "chats": len(out),
-                "messages": sum(r.get("messages", 0) for r in out if isinstance(r, dict)),
-                "files": sum(r.get("files", 0) for r in out if isinstance(r, dict)),
-                "items": out,
-            }
+            return await self._export_many(
+                list(chats), limit=limit, format=format, dest=dest,
+                since=since, until=until, media=media, media_max_mb=media_max_mb,
+            )
         if chat is None:
             raise ValueError("chat or chats is required")
 
-        limit = max(1, min(int(limit), 5000))
-        start = None
-        if since:
-            start = _day_start() if str(since).lower() in ("today", "сегодня") else _parse_when(since)
+        start = _parse_since(since) if since else None
         end = _parse_when(until) if until else None
         ent = await self.resolve(chat)
         entity = None if ent == "me" else await self.client.get_entity(ent)
-        name = "Saved Messages" if ent == "me" else entity_name(entity)
+        name = SAVED_TITLE if ent == "me" else entity_name(entity)
 
         target = Path(dest).expanduser() if dest else config.DOWNLOADS
         target.mkdir(parents=True, exist_ok=True)
+        # The chat name goes into the file name, so everything that is not a
+        # letter, a digit or a space is thrown out of it: emoji and slashes in
+        # chat titles are not rare.
         safe = "".join(c for c in name if c.isalnum() or c in " -_").strip()[:60] or "chat"
         media_dir = target / f"{safe} media"
 
-        rows = []
-        files = 0
+        rows, files, skipped = await self._export_rows(
+            ent, entity,
+            limit=max(1, min(int(limit), self.EXPORT_MAX_MESSAGES)),
+            start=start, end=end, media=media, media_max_mb=media_max_mb,
+            media_dir=media_dir,
+        )
+
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = target / f"{safe} {stamp}.{self.EXPORT_FORMATS[format]}"
+        path.write_text(
+            self._export_body(format, name, rows, files, start), encoding="utf-8"
+        )
+        out = {
+            "path": str(path),
+            "chat": name,
+            "messages": len(rows),
+            "files": files,
+            "media_dir": str(media_dir) if files else None,
+            "skipped_large": skipped or None,
+            "bytes": path.stat().st_size,
+            "format": format,
+        }
+        return {k: v for k, v in out.items() if v is not None}
+
+    async def _export_many(self, targets: list, **kwargs) -> dict:
+        """Several chats per call. A failed chat does not wreck the others: its
+        error travels into the common answer as a line, otherwise one private
+        group ruins the whole export."""
+        if len(targets) > MAX_CHATS_PER_CALL:
+            raise ValueError(f"no more than {MAX_CHATS_PER_CALL} chats at a time")
+        out = []
+        for one in targets:
+            try:
+                out.append(await self.export(chat=one, **kwargs))
+            except Exception as exc:
+                out.append({"chat": str(one), "error": f"{type(exc).__name__}: {exc}"})
+        return {
+            "chats": len(out),
+            "messages": sum(r.get("messages", 0) for r in out),
+            "files": sum(r.get("files", 0) for r in out),
+            "items": out,
+        }
+
+    async def _export_rows(
+        self, ent, entity, *, limit: int, start: datetime | None, end: datetime | None,
+        media: bool, media_max_mb: int, media_dir: Path,
+    ) -> tuple[list[dict], int, list[dict]]:
+        """The chat messages over a period; with media=True it downloads attachments
+        along the way."""
+        rows: list[dict] = []
         skipped: list[dict] = []
+        files = 0
         async for m in self.client.iter_messages(ent, limit=limit):
             if start and m.date < start:
                 break
@@ -2284,7 +2432,7 @@ class TelegramService:
                     "mime": getattr(f, "mime_type", None),
                 }
                 if media:
-                    size_mb = (getattr(f, "size", 0) or 0) / (1024 * 1024)
+                    size_mb = (getattr(f, "size", 0) or 0) / MB
                     if size_mb > media_max_mb:
                         info["skipped"] = f"larger than {media_max_mb} MB"
                         skipped.append({"message_id": m.id, "size_mb": round(size_mb, 1)})
@@ -2300,52 +2448,40 @@ class TelegramService:
                 row["file"] = {k: v for k, v in info.items() if v is not None}
             rows.append(row)
         rows.reverse()  # chronological order reads better
+        return rows, files, skipped
 
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        ext = {"json": "json", "markdown": "md", "text": "txt"}[format]
-        path = target / f"{safe} {stamp}.{ext}"
-
+    def _export_body(
+        self, format: str, name: str, rows: list[dict], files: int,
+        start: datetime | None,
+    ) -> str:
+        """The finished rows — into a file of the chosen format."""
         if format == "json":
-            body = json.dumps(
-                {"chat": name, "exported_at": _iso(datetime.now(timezone.utc)),
+            return json.dumps(
+                {"chat": name, "exported_at": _iso(datetime.now(UTC)),
                  "since": _iso(start) if start else None,
                  "count": len(rows), "files": files, "messages": rows},
                 ensure_ascii=False, indent=2,
             )
-        else:
-            lines = [f"# {name}", ""] if format == "markdown" else [name, ""]
-            for r in rows:
-                who = r.get("from") or "?"
-                stamp_line = (r.get("date") or "")[:16].replace("T", " ")
-                text = r.get("text", "")
-                extra = []
-                f_info = r.get("file") or {}
-                if f_info.get("path"):
-                    extra.append(f"file: {f_info['path']}")
-                elif f_info:
-                    extra.append(f"attachment: {f_info.get('kind')}")
-                for url in r.get("links") or []:
-                    extra.append(f"link: {url}")
-                if r.get("link"):
-                    extra.append(r["link"])
-                tail = ("\n" + "\n".join(extra)) if extra else ""
-                lines.append(
-                    f"**{who}** · {stamp_line}\n{text}{tail}\n" if format == "markdown"
-                    else f"[{stamp_line}] {who}: {text}{tail}"
-                )
-            body = "\n".join(lines)
-        path.write_text(body, encoding="utf-8")
-        out = {
-            "path": str(path),
-            "chat": name,
-            "messages": len(rows),
-            "files": files,
-            "media_dir": str(media_dir) if files else None,
-            "skipped_large": skipped or None,
-            "bytes": path.stat().st_size,
-            "format": format,
-        }
-        return {k: v for k, v in out.items() if v is not None}
+        lines = [f"# {name}", ""] if format == "markdown" else [name, ""]
+        for r in rows:
+            who = r.get("from") or "?"
+            stamp_line = (r.get("date") or "")[:16].replace("T", " ")
+            text = r.get("text", "")
+            extra = []
+            f_info = r.get("file") or {}
+            if f_info.get("path"):
+                extra.append(f"file: {f_info['path']}")
+            elif f_info:
+                extra.append(f"attachment: {f_info.get('kind')}")
+            extra += [f"link: {url}" for url in r.get("links") or []]
+            if r.get("link"):
+                extra.append(r["link"])
+            tail = ("\n" + "\n".join(extra)) if extra else ""
+            lines.append(
+                f"**{who}** · {stamp_line}\n{text}{tail}\n" if format == "markdown"
+                else f"[{stamp_line}] {who}: {text}{tail}"
+            )
+        return "\n".join(lines)
 
     # ---------- the local conversation index ----------
 
@@ -2357,7 +2493,7 @@ class TelegramService:
         ent = await self.resolve(chat)
         if ent == "me":
             me = self.me or await self.client.get_me()
-            return me.id, "Saved Messages", "saved", ent
+            return me.id, SAVED_TITLE, "saved", ent
         entity = await self.client.get_entity(ent)
         if isinstance(entity, types.User):
             kind = "bot" if entity.bot else "user"
@@ -2505,15 +2641,12 @@ class TelegramService:
                     'chats=["Mum", "Work"])'
                 )
             targets = [c["chat_id"] for c in known]
-        if len(targets) > 25:
-            raise ValueError("no more than 25 chats at a time")
+        if len(targets) > MAX_CHATS_PER_CALL:
+            raise ValueError(f"no more than {MAX_CHATS_PER_CALL} chats at a time")
 
         since_dt = None
         if since:
-            since_dt = (
-                _day_start() if str(since).lower() in ("today", "сегодня")
-                else _parse_when(since)
-            )
+            since_dt = _parse_since(since)
         backfill = bool(since or limit)
         cap = max(1, min(int(limit or INDEX_DEFAULT_LIMIT), INDEX_MAX_LIMIT))
         deadline = time.monotonic() + INDEX_BUDGET_SEC
@@ -2541,7 +2674,8 @@ class TelegramService:
             "bytes": state.get("bytes"),
             "path": state["path"],
         }
-        if any(i.get("stopped") in ("budget",) or str(i.get("stopped") or "").startswith("flood_wait")
+        if any(i.get("stopped") == "budget"
+               or str(i.get("stopped") or "").startswith("flood_wait")
                for i in items):
             out["note"] = (
                 "not everything was topped up (time or flood-wait). The sync is "
@@ -2717,10 +2851,7 @@ class TelegramService:
                 "download the file with tg_download"
             )
         p = Path(path)
-        mime = {
-            ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
-            ".webp": "image/webp", ".gif": "image/gif",
-        }.get(p.suffix.lower(), "image/jpeg")
+        mime = IMAGE_MIME.get(p.suffix.lower(), "image/jpeg")
         return {
             "path": str(p),
             "mime": mime,
@@ -2751,10 +2882,7 @@ class TelegramService:
         if path is None:
             raise ValueError("could not download the story media")
         p = Path(path)
-        mime = {
-            ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
-            ".webp": "image/webp", ".gif": "image/gif",
-        }.get(p.suffix.lower())
+        mime = IMAGE_MIME.get(p.suffix.lower())
         if mime is None:
             raise ValueError(
                 f"this is a video story ({p.suffix}), it cannot be shown as a picture — "
@@ -2770,12 +2898,12 @@ class TelegramService:
         ent = await self.resolve(chat)
         if message_ids:
             ids = [int(i) for i in message_ids]
-            if len(ids) > 20:
-                raise ValueError("no more than 20 messages at a time")
+            if len(ids) > MAX_AUDIO_PER_CALL:
+                raise ValueError(f"no more than {MAX_AUDIO_PER_CALL} messages at a time")
             msgs = await self.client.get_messages(ent, ids=ids)
             return ent, [m for m in msgs if m is not None]
         if kind not in MEDIA_FILTERS:
-            raise ValueError(f"kind: {', '.join(sorted(MEDIA_FILTERS))}")
+            raise ValueError(f"kind is one of: {media_kinds()}")
         msgs = []
         async for m in self.client.iter_messages(
             ent, limit=min(int(limit), 20), filter=MEDIA_FILTERS[kind]
@@ -2826,8 +2954,6 @@ class TelegramService:
                 "(console.groq.com/keys)"
             )
         settings = config.whisper_settings()
-        import aiohttp
-
         form = aiohttp.FormData()
         form.add_field("model", settings["groq_model"])
         form.add_field("response_format", "text")
@@ -2854,7 +2980,7 @@ class TelegramService:
         """The local model. Blocking, so it is called in a separate thread."""
         model = config.whisper_settings()["local_model"]
         try:
-            import mlx_whisper                                   # Apple Silicon
+            import mlx_whisper  # Apple Silicon
         except ImportError:
             mlx_whisper = None
         if mlx_whisper is not None:
@@ -2948,7 +3074,7 @@ class TelegramService:
                     path.unlink(missing_ok=True)
             rows.append(row)
         return {
-            "chat": entity_name(await self.client.get_entity(ent)) if ent != "me" else "Saved Messages",
+            "chat": await self.chat_title(ent),
             "count": len(rows),
             "items": rows,
         }
@@ -2970,8 +3096,8 @@ class TelegramService:
             raise ValueError("text is required, or chat + message_ids")
         ent = await self.resolve(chat)
         ids = [int(i) for i in message_ids]
-        if len(ids) > 20:
-            raise ValueError("no more than 20 messages at a time")
+        if len(ids) > MAX_TRANSLATE_PER_CALL:
+            raise ValueError(f"no more than {MAX_TRANSLATE_PER_CALL} messages at a time")
         res = await self.client(
             functions.messages.TranslateTextRequest(
                 to_lang=to_lang,
@@ -2981,9 +3107,12 @@ class TelegramService:
         )
         return {
             "to": to_lang,
+            # strict=False: as many translations as the server returned is as
+            # many as we hand over. It may send fewer than asked for, and that is
+            # no reason to fail.
             "items": [
                 {"message_id": mid, "text": r.text}
-                for mid, r in zip(ids, res.result)
+                for mid, r in zip(ids, res.result, strict=False)
             ],
         }
 
@@ -3001,8 +3130,8 @@ class TelegramService:
         ids = [int(i) for i in (message_ids or [])]
         if not ids:
             raise ValueError("message_ids is required")
-        if len(ids) > 10:
-            raise ValueError("no more than 10 messages at a time")
+        if len(ids) > MAX_SUMMARIZE_PER_CALL:
+            raise ValueError(f"no more than {MAX_SUMMARIZE_PER_CALL} messages at a time")
         items = []
         for mid in ids:
             row: dict[str, Any] = {"message_id": mid}
@@ -3016,7 +3145,7 @@ class TelegramService:
             except Exception as exc:
                 row["error"] = f"{type(exc).__name__}: {exc}"
             items.append(row)
-        return {"chat": entity_name(await self.client.get_entity(ent)) if ent != "me" else "Saved Messages",
+        return {"chat": await self.chat_title(ent),
                 "to": to_lang, "items": items}
 
     # ---------- stories ----------
@@ -3254,7 +3383,8 @@ class TelegramService:
                     "created": _iso(tpc.date),
                 }
             )
-        return {"chat": entity_name(await self.client.get_entity(ent)), "count": len(rows), "topics": rows}
+        chat_name = entity_name(await self.client.get_entity(ent))
+        return {"chat": chat_name, "count": len(rows), "topics": rows}
 
     async def admin_log(
         self, chat: Any, limit: int = 50, query: str = "", admins: list | None = None
@@ -3278,11 +3408,13 @@ class TelegramService:
         rows = []
         for ev in res.events:
             action = type(ev.action).__name__.replace("ChannelAdminLogEventAction", "")
+            # user_id arrives now as a number, now as a peer object, depending on
+            # the event type.
+            by_id = ev.user_id if isinstance(ev.user_id, int) else utils.get_peer_id(ev.user_id)
             row = {
                 "id": ev.id,
                 "date": _iso(ev.date),
-                "by": users.get(utils.get_peer_id(ev.user_id) if not isinstance(ev.user_id, int) else ev.user_id)
-                or str(ev.user_id),
+                "by": users.get(by_id) or str(ev.user_id),
                 "action": action,
             }
             for field in ("new_value", "prev_value", "message", "new_title"):
@@ -3293,7 +3425,8 @@ class TelegramService:
             if msg is not None and hasattr(msg, "message"):
                 row["message"] = (msg.message or "")[:200]
             rows.append(row)
-        return {"chat": entity_name(await self.client.get_entity(ent)), "count": len(rows), "events": rows}
+        chat_name = entity_name(await self.client.get_entity(ent))
+        return {"chat": chat_name, "count": len(rows), "events": rows}
 
     async def invites(
         self, chat: Any, link: str | None = None, limit: int = 50, revoked: bool = False
@@ -3409,7 +3542,7 @@ class TelegramService:
     def _invites_error(exc: Exception, chat: str) -> ValueError:
         """Telegram answers with a dry code — we turn it into an explanation."""
         name = type(exc).__name__
-        text = str(exc).split(" (caused")[0]
+        text = tg_error_text(exc)
         if "ChatAdminRequired" in name:
             return ValueError(
                 f"\"{chat}\": admin rights are needed — invites are seen only by the one "
@@ -3429,14 +3562,15 @@ class TelegramService:
         res = await self.client(
             functions.bots.GetBotInfoRequest(bot=inp, lang_code=lang_code or "")
         )
+        entity = await self.client.get_entity(ent)
         out = {
-            "bot": entity_name(await self.client.get_entity(ent)),
+            "bot": entity_name(entity),
             "name": getattr(res, "name", None),
             "about": getattr(res, "about", None),
             "description": getattr(res, "description", None),
         }
         token = config.bot_token()
-        if token and str(getattr(await self.client.get_entity(ent), "id", "")) == token.split(":")[0]:
+        if token and str(getattr(entity, "id", "")) == token.split(":")[0]:
             from .alerts import BotChannel
 
             channel = BotChannel(token=token)
@@ -3463,7 +3597,11 @@ class TelegramService:
 
     def _assert_write(self) -> None:
         if not config.allow_write():
-            raise GuardError("Write actions are disabled (TG_ALLOW_WRITE=0 in .env).")
+            raise GuardError(
+                "Writing is switched off by the owner: TG_ALLOW_WRITE=0 in .env. "
+                "Everything may be read, nothing on the account may be changed. Only "
+                "the owner can lift the ban."
+            )
 
     async def _send_key(self, ent) -> str:
         """The chat key for the anti-spam counter."""
@@ -3480,17 +3618,16 @@ class TelegramService:
         link_preview: bool = True,
     ) -> dict:
         self._assert_write()
-        if len(text) > config.LIMITS["max_text_len"]:
-            raise GuardError("Message longer than 4096 characters; split it.")
+        _assert_text_len(text, "The message")
         ent = await self.resolve(chat)
-        key = str(utils.get_peer_id(await self.client.get_entity(ent)) if ent != "me" else "me")
+        key = await self._send_key(ent)
         self.guard.check_send(key)
         try:
             msg = await self.client.send_message(
                 ent, text, reply_to=reply_to, silent=silent, link_preview=link_preview
             )
         except FloodWaitError as exc:
-            raise GuardError(f"Telegram flood-wait: retry in {exc.seconds}s") from exc
+            raise GuardError(_flood_text(exc)) from exc
         self.guard.record_send(key)
         return {"sent": True, "chat": key, "message_id": msg.id, "date": _iso(msg.date)}
 
@@ -3511,7 +3648,7 @@ class TelegramService:
         for item in raw:
             p = Path(str(item)).expanduser()
             if not p.exists():
-                raise ValueError(f"File not found: {p}")
+                raise ValueError(f"There is no file {p} — check the path")
             files.append(p)
         ent = await self.resolve(chat)
         key = await self._send_key(ent)
@@ -3549,10 +3686,9 @@ class TelegramService:
     ) -> dict:
         """Scheduled sending: when is an ISO time or +30m / +2h / +3d."""
         self._assert_write()
-        if len(text) > config.LIMITS["max_text_len"]:
-            raise GuardError("Message longer than 4096 characters; split it.")
+        _assert_text_len(text, "The message")
         at = _parse_when(when)
-        if at <= datetime.now(timezone.utc) + timedelta(seconds=10):
+        if at <= datetime.now(UTC) + timedelta(seconds=10):
             raise ValueError("The earliest one can schedule is 10 seconds ahead")
         ent = await self.resolve(chat)
         key = await self._send_key(ent)
@@ -3560,7 +3696,7 @@ class TelegramService:
         try:
             msg = await self.client.send_message(ent, text, schedule=at, reply_to=reply_to)
         except FloodWaitError as exc:
-            raise GuardError(f"Telegram flood-wait: retry in {exc.seconds}s") from exc
+            raise GuardError(_flood_text(exc)) from exc
         self.guard.record_send(key)
         return {"scheduled": True, "message_id": msg.id, "at": _iso(at), "chat": key}
 
@@ -3577,8 +3713,7 @@ class TelegramService:
             return {"cleared": True}
         if text is None:
             raise ValueError("text is required, or clear=true")
-        if len(text) > config.LIMITS["max_text_len"]:
-            raise GuardError("Draft longer than 4096 characters; split it.")
+        _assert_text_len(text, "The draft")
         await d.set_message(text, reply_to=reply_to)
         return {
             "saved": True,
@@ -4088,7 +4223,7 @@ class TelegramService:
         if photo:
             p = Path(photo).expanduser()
             if not p.exists():
-                raise ValueError(f"File not found: {p}")
+                raise ValueError(f"There is no file {p} — check the path")
             uploaded = await self.client.upload_file(str(p))
             new_photo = types.InputChatUploadedPhoto(file=uploaded)
             if is_channel:
@@ -4166,6 +4301,142 @@ class TelegramService:
         "exclude_muted", "exclude_read", "exclude_archived",
     )
 
+    def _folder_flags(self, rules: dict | None) -> dict:
+        """The folder auto-rules from the argument — with a check of the names.
+
+        A typo in a rule name would otherwise pass silently: Telegram says
+        nothing about an unknown flag, the folder simply stays as it was.
+        """
+        flags = {}
+        for key, value in (rules or {}).items():
+            if key not in self.FOLDER_RULES:
+                raise ValueError(f"folder rules: {', '.join(self.FOLDER_RULES)}")
+            flags[key] = bool(value)
+        return flags
+
+    async def _folder_peers(self, chats: list | None) -> list:
+        return [
+            await self.client.get_input_entity(await self.resolve(chat))
+            for chat in chats or []
+        ]
+
+    async def _folder_create(
+        self, existing: list, title: str, add: list | None, exclude: list | None,
+        rules: dict | None, emoji: str | None,
+    ) -> dict:
+        taken = {f.id for f in existing}
+        # the folder id is picked by the client; 0 and 1 are taken by the system
+        # "All chats" and the archive
+        new_id = next(i for i in range(2, 256) if i not in taken)
+        include = await self._folder_peers(add)
+        excluded = await self._folder_peers(exclude)
+        flags = self._folder_flags(rules)
+        fl = types.DialogFilter(
+            id=new_id,
+            title=types.TextWithEntities(text=str(title)[:FOLDER_TITLE_LEN], entities=[]),
+            pinned_peers=[], include_peers=include, exclude_peers=excluded,
+            emoticon=emoji, **flags,
+        )
+        await self.client(
+            functions.messages.UpdateDialogFilterRequest(id=new_id, filter=fl)
+        )
+        return {
+            "created": str(title)[:FOLDER_TITLE_LEN],
+            "id": new_id,
+            "chats": len(include),
+            "excluded": len(excluded),
+            "rules": flags or None,
+            "emoji": emoji,
+        }
+
+    @staticmethod
+    def _folder_find(filters: list, folder: Any):
+        """A folder by id, by exact title or by a piece of it."""
+        want = str(folder).strip().lower()
+        for fl in filters:
+            fid = getattr(fl, "id", None)
+            raw_title = getattr(fl, "title", None)
+            title = getattr(raw_title, "text", raw_title)
+            if fid is None or title is None:
+                continue  # "All chats" is a system one, nothing to change
+            if want == str(fid) or want in str(title).lower():
+                return fl
+        raise ValueError(f"Folder {folder!r} was not found")
+
+    async def _folder_apply(
+        self, target, add: list | None, remove: list | None, exclude: list | None,
+        rename: str | None, emoji: str | None, rules: dict | None,
+    ) -> dict:
+        """Edits to an existing folder. The whole filter object is changed:
+        Telegram accepts a folder only as one piece, it has no partial update."""
+        known = {
+            utils.get_peer_id(p)
+            for p in list(target.include_peers) + list(target.pinned_peers)
+        }
+        added: list[str] = []
+        removed: list[str] = []
+        changed: dict[str, Any] = {}
+
+        if rename:
+            changed["title"] = str(rename)[:FOLDER_TITLE_LEN]
+            target.title = types.TextWithEntities(text=changed["title"], entities=[])
+        if emoji is not None:
+            target.emoticon = emoji or None
+            changed["emoji"] = emoji or None
+        for key, value in self._folder_flags(rules).items():
+            setattr(target, key, value)
+            changed[key] = value
+
+        excluded_ids = {utils.get_peer_id(p) for p in target.exclude_peers}
+        for chat in exclude or []:
+            ent = await self.resolve(chat)
+            peer = await self.client.get_input_entity(ent)
+            if utils.get_peer_id(peer) in excluded_ids:
+                continue
+            target.exclude_peers.append(peer)
+            excluded_ids.add(utils.get_peer_id(peer))
+            changed.setdefault("excluded", []).append(
+                entity_name(await self.client.get_entity(ent))
+            )
+        for chat in add or []:
+            ent = await self.resolve(chat)
+            peer = await self.client.get_input_entity(ent)
+            if utils.get_peer_id(peer) in known:
+                continue
+            target.include_peers.append(peer)
+            known.add(utils.get_peer_id(peer))
+            added.append(entity_name(await self.client.get_entity(ent)))
+        for chat in remove or []:
+            ent = await self.resolve(chat)
+            pid = utils.get_peer_id(await self.client.get_entity(ent))
+            before = len(target.include_peers) + len(target.pinned_peers)
+            target.include_peers = [
+                p for p in target.include_peers if utils.get_peer_id(p) != pid
+            ]
+            target.pinned_peers = [
+                p for p in target.pinned_peers if utils.get_peer_id(p) != pid
+            ]
+            if before != len(target.include_peers) + len(target.pinned_peers):
+                removed.append(entity_name(await self.client.get_entity(ent)))
+
+        if not (added or removed or changed):
+            raise ValueError(
+                "nothing to change: pass add, remove, exclude, rename, emoji, rules or delete"
+            )
+        await self.client(
+            functions.messages.UpdateDialogFilterRequest(id=target.id, filter=target)
+        )
+        out = {
+            "folder": getattr(getattr(target, "title", None), "text", None),
+            "id": target.id,
+            "added": added,
+            "removed": removed,
+            "total": len(target.include_peers) + len(target.pinned_peers),
+        }
+        if changed:
+            out["changed"] = changed
+        return out
+
     async def folder_edit(
         self,
         folder: Any = None,
@@ -4190,122 +4461,25 @@ class TelegramService:
         existing = [f for f in res.filters if getattr(f, "id", None) is not None]
 
         if create:
-            taken = {f.id for f in existing}
-            # the folder id is picked by the client; 0 and 1 are taken by the
-            # system "All chats" and the archive
-            new_id = next(i for i in range(2, 256) if i not in taken)
-            include, excluded = [], []
-            for chat in add or []:
-                include.append(await self.client.get_input_entity(await self.resolve(chat)))
-            for chat in exclude or []:
-                excluded.append(await self.client.get_input_entity(await self.resolve(chat)))
-            flags = {}
-            for key, value in (rules or {}).items():
-                if key not in self.FOLDER_RULES:
-                    raise ValueError(f"folder rules: {', '.join(self.FOLDER_RULES)}")
-                flags[key] = bool(value)
-            fl = types.DialogFilter(
-                id=new_id,
-                title=types.TextWithEntities(text=str(create)[:12], entities=[]),
-                pinned_peers=[], include_peers=include, exclude_peers=excluded,
-                emoticon=emoji, **flags,
-            )
-            await self.client(
-                functions.messages.UpdateDialogFilterRequest(id=new_id, filter=fl)
-            )
-            return {
-                "created": str(create)[:12],
-                "id": new_id,
-                "chats": len(include),
-                "excluded": len(excluded),
-                "rules": flags or None,
-                "emoji": emoji,
-            }
+            return await self._folder_create(existing, create, add, exclude, rules, emoji)
 
         if folder is None:
             raise ValueError("a folder (id or title) is required, or create")
-
-        want = str(folder).strip().lower()
-        target = None
-        for fl in res.filters:
-            fid = getattr(fl, "id", None)
-            raw_title = getattr(fl, "title", None)
-            title = getattr(raw_title, "text", raw_title)
-            if fid is None or title is None:
-                continue  # "All chats" is a system one, nothing to change
-            if want == str(fid) or want == str(title).lower() or want in str(title).lower():
-                target = fl
-                break
-        if target is None or not hasattr(target, "include_peers"):
+        target = self._folder_find(res.filters, folder)
+        if not hasattr(target, "include_peers"):
             raise ValueError(f"Folder {folder!r} was not found")
 
-        title_now = getattr(getattr(target, "title", None), "text", None)
         if delete:
+            title_now = getattr(getattr(target, "title", None), "text", None)
             await self.client(
                 functions.messages.UpdateDialogFilterRequest(id=target.id, filter=None)
             )
             return {"deleted": title_now, "id": target.id,
                     "note": "the chats themselves stayed in place, only the folder is gone"}
 
-        known = {utils.get_peer_id(p) for p in list(target.include_peers) + list(target.pinned_peers)}
-        added, removed, changed = [], [], {}
-
-        if rename:
-            target.title = types.TextWithEntities(text=str(rename)[:12], entities=[])
-            changed["title"] = str(rename)[:12]
-        if emoji is not None:
-            target.emoticon = emoji or None
-            changed["emoji"] = emoji or None
-        for key, value in (rules or {}).items():
-            if key not in self.FOLDER_RULES:
-                raise ValueError(f"folder rules: {', '.join(self.FOLDER_RULES)}")
-            setattr(target, key, bool(value))
-            changed[key] = bool(value)
-        for chat in exclude or []:
-            ent = await self.resolve(chat)
-            peer = await self.client.get_input_entity(ent)
-            if utils.get_peer_id(peer) not in {utils.get_peer_id(p) for p in target.exclude_peers}:
-                target.exclude_peers.append(peer)
-                changed.setdefault("excluded", []).append(
-                    entity_name(await self.client.get_entity(ent))
-                )
-        for chat in add or []:
-            ent = await self.resolve(chat)
-            peer = await self.client.get_input_entity(ent)
-            if utils.get_peer_id(peer) in known:
-                continue
-            target.include_peers.append(peer)
-            known.add(utils.get_peer_id(peer))
-            added.append(entity_name(await self.client.get_entity(ent)))
-        for chat in remove or []:
-            ent = await self.resolve(chat)
-            pid = utils.get_peer_id(await self.client.get_entity(ent))
-            before = len(target.include_peers) + len(target.pinned_peers)
-            target.include_peers = [
-                p for p in target.include_peers if utils.get_peer_id(p) != pid
-            ]
-            target.pinned_peers = [
-                p for p in target.pinned_peers if utils.get_peer_id(p) != pid
-            ]
-            if before != len(target.include_peers) + len(target.pinned_peers):
-                removed.append(entity_name(await self.client.get_entity(ent)))
-        if not (added or removed or changed):
-            raise ValueError(
-                "nothing to change: pass add, remove, exclude, rename, emoji, rules or delete"
-            )
-        await self.client(
-            functions.messages.UpdateDialogFilterRequest(id=target.id, filter=target)
+        return await self._folder_apply(
+            target, add, remove, exclude, rename, emoji, rules
         )
-        out = {
-            "folder": getattr(getattr(target, "title", None), "text", None),
-            "id": target.id,
-            "added": added,
-            "removed": removed,
-            "total": len(target.include_peers) + len(target.pinned_peers),
-        }
-        if changed:
-            out["changed"] = changed
-        return out
 
     async def edit(self, chat: Any, message_id: int, text: str) -> dict:
         self._assert_write()
@@ -4326,7 +4500,7 @@ class TelegramService:
         self._assert_write()
         src = await self.resolve(from_chat)
         dst = await self.resolve(to_chat)
-        key = str(utils.get_peer_id(await self.client.get_entity(dst)) if dst != "me" else "me")
+        key = await self._send_key(dst)
         self.guard.check_send(key)
         res = await self.client.forward_messages(dst, [int(i) for i in message_ids], src)
         self.guard.record_send(key)
@@ -4358,7 +4532,7 @@ class TelegramService:
     @staticmethod
     def _notify_row(s) -> dict:
         until = getattr(s, "mute_until", None)
-        muted = bool(until and until > datetime.now(timezone.utc))
+        muted = bool(until and until > datetime.now(UTC))
         return {
             "muted": muted,
             "muted_until": _iso(until) if muted else None,
@@ -4421,7 +4595,7 @@ class TelegramService:
                 peer = types.InputNotifyPeer(peer=await self.client.get_input_entity(ent))
                 s = await self.client(functions.account.GetNotifySettingsRequest(peer=peer))
                 return {
-                    "chat": entity_name(await self.client.get_entity(ent)) if ent != "me" else "Saved Messages",
+                    "chat": await self.chat_title(ent),
                     **self._notify_row(s),
                 }
             out = {}
@@ -4434,13 +4608,13 @@ class TelegramService:
 
         self._assert_write()
         if mute is True:
-            until = datetime.now(timezone.utc) + (
+            until = datetime.now(UTC) + (
                 timedelta(hours=hours) if hours else timedelta(days=365 * 5)
             )
         elif mute is False:
             until = None
         elif hours:
-            until = datetime.now(timezone.utc) + timedelta(hours=hours)
+            until = datetime.now(UTC) + timedelta(hours=hours)
         else:
             until = None
 
@@ -4458,7 +4632,7 @@ class TelegramService:
         elif chat is not None:
             ent = await self.resolve(chat)
             peer = types.InputNotifyPeer(peer=await self.client.get_input_entity(ent))
-            where = entity_name(await self.client.get_entity(ent)) if ent != "me" else "Saved Messages"
+            where = await self.chat_title(ent)
         else:
             raise ValueError("chat or scope is required")
         await self.client(
@@ -4473,9 +4647,9 @@ class TelegramService:
         if unmute:
             until = None
         elif hours:
-            until = datetime.now(timezone.utc) + timedelta(hours=hours)
+            until = datetime.now(UTC) + timedelta(hours=hours)
         else:
-            until = datetime.now(timezone.utc) + timedelta(days=365 * 5)
+            until = datetime.now(UTC) + timedelta(days=365 * 5)
         settings = types.InputPeerNotifySettings(mute_until=until, show_previews=None, silent=None)
         await self.client(
             functions.account.UpdateNotifySettingsRequest(peer=ent, settings=settings)

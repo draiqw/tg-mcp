@@ -18,7 +18,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     uv sync --locked --no-install-project --no-dev
 
-COPY pyproject.toml uv.lock README.md ./
+# LICENSE goes into the image together with the code: MIT requires the licence
+# text to accompany any copy of the program, and an image is a copy.
+COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY tgagent ./tgagent
 
 RUN --mount=type=cache,target=/root/.cache/uv \

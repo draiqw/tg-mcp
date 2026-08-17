@@ -184,7 +184,7 @@ To wipe:
 
 ```bash
 uv run tg call index '{"action":"drop"}'                   # the whole index
-uv run tg call index '{"action":"drop","chats":["Huts"]}'  # a single chat
+uv run tg call index '{"action":"drop","chats":["Work"]}'  # a single chat
 ```
 
 A full wipe deletes the file rather than clearing the tables: only that way do
@@ -223,7 +223,7 @@ What follows from this by design:
 - Every update and wipe is written to `actions.jsonl` (`AUDIT_ONLY`); automatic
   ones carry the mark `auto: memory_auto`.
 
-To wipe: `uv run tg call memory '{"chat":"Huts","action":"drop"}'`.
+To wipe: `uv run tg call memory '{"chat":"Work","action":"drop"}'`.
 
 Separately about injections: a dossier is written **from untrusted text**. The
 model's prompt says outright that the contents of the correspondence are data,

@@ -2,19 +2,19 @@
 
 ## Where the core is
 
-`tgagent/core.py`, ~4300 lines, class `TelegramService`. This is the only place where
+`tgagent/core.py`, ~4600 lines, class `TelegramService`. This is the only place where
 the code talks to Telegram. Everything else is transport and scaffolding:
 
 | File | Lines | Role |
 |---|---|---|
-| **`tgagent/core.py`** | 4505 | **core: all account operations, chat resolution, limits** |
-| `tgagent/daemon.py` | 1746 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
-| `tgagent/mcp_server.py` | 1445 | 77 tools, each one a single call to the daemon |
-| `tgagent/index.py` | 669 | local index of the correspondence: sqlite + FTS5, Russian morphology |
+| **`tgagent/core.py`** | 4679 | **core: all account operations, chat resolution, limits** |
+| `tgagent/daemon.py` | 1758 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
+| `tgagent/mcp_server.py` | 1452 | 77 tools, each one a single call to the daemon |
+| `tgagent/index.py` | 670 | local index of the correspondence: sqlite + FTS5, Russian morphology |
 | `tgagent/memory.py` | 234 | chat dossiers: file format, prompt, language-model call |
-| `tgagent/cli.py` | 520 | setup, sign-in, daemon control |
-| `tgagent/config.py` | 340 | paths, `.env`, rules, limits |
-| `tgagent/alerts.py` | 125 | Bot API: alerts, commands, buttons under the agent's questions |
+| `tgagent/cli.py` | 525 | setup, sign-in, daemon control |
+| `tgagent/config.py` | 341 | paths, `.env`, rules, limits |
+| `tgagent/alerts.py` | 138 | Bot API: alerts, commands, buttons under the agent's questions |
 
 The rule is simple: a new capability goes into `core.py` as a `TelegramService`
 method, gets registered in the daemon's `dispatch_table()` and is wrapped by a
@@ -79,7 +79,7 @@ not in the core: the core knows nothing about the bot and must not know.
 
 Errors are classified in the daemon: `GuardError` and `ValueError` (limit exceeded,
 chat not found, ambiguous name) are returned as 400 with human-readable text,
-everything else as 500 with the exception type. The agent sees "Send limit reached (60/hour)",
+everything else as 500 with the exception type. The agent sees "Send guard: 60 messages already in the last hour",
 not a traceback.
 
 **An incoming message.**
@@ -164,12 +164,36 @@ incoming stream, and there is no point in listening to it a second time.
 
 ## Integrity check
 
-Two scripts, both safe for the account:
+Four levels, all safe for the account:
 
 ```bash
-uv run python scripts/selfcheck.py   # static analysis, no daemon needed
-uv run python scripts/smoke.py       # a live run of the reading methods
+uv run ruff check tgagent scripts tests   # linter, configured in pyproject.toml
+uv run pytest -q                          # tests: no network, no session, no keys
+uv run python scripts/selfcheck.py        # static analysis, no daemon needed
+uv run python scripts/smoke.py            # a live run of the reading methods
 ```
+
+The set of ruff rules is assembled for this project and listed in `[tool.ruff.lint]`
+together with the reasons: errors, imports, bug-prone constructs, outdated syntax and
+blocking calls in coroutines are enabled. The rules about a "broad except" are switched
+off deliberately — the watcher and the daemon's handlers have to survive any error on a
+single message, otherwise the owner of the session dies as a whole. `ruff format` was
+not adopted: it would rewrite the aligned trailing comments in the rule and dispatcher
+tables, and that is about 1900 lines of noise in the history.
+
+`tests/` is the only level that executes the code instead of parsing it. What gets
+checked is where a mistake is silent and expensive: the parsing of settings and the
+protection against self-disabling (`save_rules` does not reset the confirmation mode),
+the dossier format and the ban on executing instructions from the correspondence, the
+morphology and the index queries, the slicing of links by UTF-16 offsets, the write
+limits, the order of checks in `alert_reason`, the inbox filters, the write
+confirmation, the reminders and the digest.
+
+The tests need neither the network, nor the session file, nor keys: `tests/conftest.py`
+points `TG_ENV_FILE` at a non-existent file and `TG_DATA_DIR` at a temporary directory,
+its own for each test. Telegram is replaced by fakes; real Telethon objects are taken
+only where the code looks at their type. So a test that climbs into the live account
+cannot be written by accident — only on purpose.
 
 `selfcheck.py` reconciles four lists that drift apart easily: the MCP tools, the
 methods of the daemon's `dispatch_table`, the methods of `TelegramService` and the

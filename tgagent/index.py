@@ -18,9 +18,10 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
-from datetime import datetime, timezone
+from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 # The tokenizer was picked by checking, not from memory: on this machine's
 # sqlite (3.50.4) `pragma compile_options` reports ENABLE_FTS5, and the table is
@@ -462,7 +463,7 @@ class MessageIndex:
         own = conn is None
         conn = conn or self._connect()
         try:
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(UTC).isoformat()
             row = conn.execute(
                 "SELECT min_id, max_id FROM chats WHERE chat_id=?", (chat_id,)
             ).fetchone()

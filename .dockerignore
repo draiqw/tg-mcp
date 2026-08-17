@@ -1,5 +1,6 @@
 # Secrets and state stay out of the image — they are mounted as a volume
 .env
+.env.*
 data/
 *.session
 *.session-journal
@@ -7,7 +8,20 @@ data/
 .venv/
 __pycache__/
 *.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
 .git/
+.github/
 .DS_Store
+
+# Only the daemon code goes into the image: docs, tests, the script scaffolding
+# and the subagent prompts are not needed there. The exception is README.md and
+# LICENSE: the Dockerfile copies them, so they must not appear in this list.
 docs/
+tests/
+scripts/
+agents/
 *.plist

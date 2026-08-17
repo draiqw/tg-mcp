@@ -130,7 +130,7 @@ uv run tg call whoami             # a live RPC bypassing MCP
 
 | Symptom | Cause |
 |---|---|
-| `Telegram daemon is not running` | the daemon is not up: `uv run tg daemon start` (in docker `docker compose up -d`) |
+| `Telegram daemon is not responding` | the daemon is not up: `uv run tg daemon start` (in docker `docker compose up -d`) |
 | `Connection refused` with a live socket | the daemon died, the socket file stayed: `tg daemon restart` |
 | the server is there, the tools are not | the Claude Code session started before the install — restart it |
 | `✘ Failed to connect` in `claude mcp list` | check that the command works by hand: `uv --directory ~/tg-agent run tg-mcp` |

@@ -117,10 +117,14 @@ async def _login(args) -> int:
         await client.disconnect()
         return 0
 
-    phone = input("Phone in +79991234567 format: ").strip()
+    # Blocking the loop on the two lines below is the whole point of the step: this
+    # is a one-off sign-in from a terminal, nothing else spins in this process,
+    # and waiting is exactly what we owe the person — asyncio has no async
+    # replacement for input() anyway.
+    phone = input("Phone in +79991234567 format: ").strip()  # noqa: ASYNC250 — waiting for a human
     sent = await client.send_code_request(phone)
     _p("Code sent to Telegram (not SMS — check the app).")
-    code = input("Code: ").strip()
+    code = input("Code: ").strip()  # noqa: ASYNC250 — waiting for a human
     try:
         await client.sign_in(phone, code, phone_code_hash=sent.phone_code_hash)
     except SessionPasswordNeededError:
@@ -278,7 +282,8 @@ def cmd_logout(args) -> int:
         from telethon import TelegramClient
 
         api_id, api_hash = config.api_credentials()
-        client = TelegramClient(str(config.session_path(getattr(args, "account", None))), api_id, api_hash)
+        session = str(config.session_path(getattr(args, "account", None)))
+        client = TelegramClient(session, api_id, api_hash)
         await client.connect()
         if await client.is_user_authorized():
             await client.log_out()

@@ -118,8 +118,8 @@ reads a single forum thread (the id comes from `tg_topics`).
 
 `saved_from` works only with `chat="me"` and reads one subfolder of Saved
 Messages. What is forwarded to yourself Telegram stores not as a flat feed but
-laid out by original author: everything forwarded from the "Backdoor" channel
-lies in the "Backdoor" subfolder, what you wrote to yourself lies in a subfolder with your
+laid out by original author: everything forwarded from the "News" channel lies
+in the "News" subfolder, what you wrote to yourself lies in a subfolder with your
 own name. The list of subfolders is `tg_dialogs(kind="saved")`; the name or id
 from there is what goes into `saved_from`. In other chats this cut does not
 exist, so with any `chat` other than `"me"` the parameter returns an error rather
