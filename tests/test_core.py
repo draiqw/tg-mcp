@@ -377,3 +377,92 @@ def test_the_dialog_row(service, user):
 def test_the_link_to_a_dm(user):
     assert core.dm_link(user) == "https://t.me/petya"
     assert core.dm_link(types.User(id=42, first_name="No username")) == "tg://user?id=42"
+
+
+# ---------------------------------------------------------------- account limits
+
+
+def _json(value):
+    """A Python value — into a tree of MTProto JSON types, as Telegram sends them."""
+    if isinstance(value, dict):
+        return types.JsonObject(
+            value=[types.JsonObjectValue(key=k, value=_json(v)) for k, v in value.items()]
+        )
+    if isinstance(value, list):
+        return types.JsonArray(value=[_json(v) for v in value])
+    if value is None:
+        return types.JsonNull()
+    if isinstance(value, bool):
+        return types.JsonBool(value=value)
+    if isinstance(value, (int, float)):
+        return types.JsonNumber(value=float(value))
+    return types.JsonString(value=str(value))
+
+
+class FakeConfigClient:
+    """A client answering help.getAppConfig with a given configuration."""
+
+    def __init__(self, raw: dict) -> None:
+        self.raw = raw
+
+    async def __call__(self, request):
+        return types.help.AppConfig(hash=1, config=_json(self.raw))
+
+
+def test_the_app_configuration_is_parsed_into_plain_python():
+    tree = _json({"a": 10, "b": "text", "c": True, "d": None, "e": [1, {"f": 2.5}]})
+    assert core._json_py(tree) == {
+        "a": 10, "b": "text", "c": True, "d": None, "e": [1, {"f": 2.5}],
+    }
+
+
+def test_whole_numbers_in_the_configuration_do_not_stay_fractional():
+    """Telegram sends every number as a float: "10.0 folders" reads as a bug."""
+    assert core._json_py(_json({"n": 10})) == {"n": 10}
+    assert isinstance(core._json_py(_json({"n": 10}))["n"], int)
+
+
+async def test_the_limit_is_taken_by_whether_premium_is_there(service):
+    raw = {
+        "dialogs_pinned_limit_default": 5,
+        "dialogs_pinned_limit_premium": 10,
+        "transcribe_audio_trial_weekly_number": 0,
+    }
+    service.client = FakeConfigClient(raw)
+
+    service.me = types.User(id=1, first_name="Someone", premium=False)
+    plain = await service.limits()
+    assert plain["premium"] is False
+    assert plain["limits"]["dialogs_pinned_limit"]["value"] == 5
+
+    service.me = types.User(id=1, first_name="Someone", premium=True)
+    prem = await service.limits()
+    assert prem["premium"] is True
+    assert prem["limits"]["dialogs_pinned_limit"]["value"] == 10
+    # Single values without a pair go separately and are not substituted.
+    assert prem["single"]["transcribe_audio_trial_weekly_number"] == 0
+
+
+async def test_a_limit_that_vanished_is_visible_and_does_not_keep_quiet(service):
+    """Telegram is free to rename a key; "there is no limit" and "the limit did not
+    arrive" are different things, and the second one is obliged to be noticeable."""
+    service.me = types.User(id=1, first_name="Someone", premium=False)
+    service.client = FakeConfigClient({"dialogs_pinned_limit_default": 5})
+    out = await service.limits()
+    assert "dialogs_pinned_limit" not in out["limits"]
+    assert "dialogs_pinned_limit" in out["not_reported"]
+
+
+async def test_full_mode_returns_every_pair_and_the_remaining_keys(service):
+    service.me = types.User(id=1, first_name="Someone", premium=False)
+    service.client = FakeConfigClient({
+        "unknown_thing_limit_default": 1,
+        "unknown_thing_limit_premium": 2,
+        "some_flag": "premium",
+        "domains": ["a.tld", "b.tld"],
+    })
+    out = await service.limits(full=True)
+    assert out["all_pairs"]["unknown_thing_limit"]["premium"] == 2
+    assert out["other"]["some_flag"] == "premium"
+    # Nested values bloat the answer and have nothing to do with access.
+    assert out["other"]["domains"] == "<list, 2>"

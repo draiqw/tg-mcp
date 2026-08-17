@@ -94,8 +94,8 @@ cp ~/tg-agent/agents/*.md ~/.claude/agents/
 
 | Agent | Model | Set |
 |---|---|---|
-| `telegram` | Sonnet | all 77 tools, carries on conversations in your name |
-| `telegram-watch` | Haiku | 39: reading, alerts, `mark_read`/`mute`/`archive`; `tg_send` to Saved Messages only |
+| `telegram` | Sonnet | all 79 tools, carries on conversations in your name |
+| `telegram-watch` | Haiku | 41: reading, alerts, `mark_read`/`mute`/`archive`; `tg_send` to Saved Messages only |
 
 The watcher has nothing destructive — no `tg_delete`, `tg_edit`, `tg_forward`,
 `tg_pin`, no moderation, reactions, buttons or leaving chats. There is no `tg_index`

@@ -93,11 +93,140 @@ def module_constant(module: str, name: str) -> set[str]:
         if not any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
             continue
         value = node.value
+        # frozenset({...}) is the same literal, just wrapped: we unwrap it,
+        # otherwise the constant would read as empty and the check as passing.
+        if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+                and value.func.id in ("frozenset", "set") and value.args):
+            value = value.args[0]
         if isinstance(value, ast.Dict):
             return {k.value for k in value.keys if isinstance(k, ast.Constant)}
         if isinstance(value, (ast.Set, ast.Tuple, ast.List)):
             return {e.value for e in value.elts if isinstance(e, ast.Constant)}
     return set()
+
+
+def module_dict_values(module: str, name: str) -> set[str]:
+    """Values of a top-level dictionary — as strings.
+
+    In tables of the form "tool -> right" the meaning is carried by the right
+    half, while `module_constant` gives back the left one. Pairs of values
+    (SERVER_FLAG_TOOLS) count by their first element: it holds the configuration
+    key name, the rest is an explanation.
+    """
+    tree = ast.parse((ROOT / "tgagent" / module).read_text())
+    out: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            continue
+        if not isinstance(node.value, ast.Dict):
+            continue
+        for item in node.value.values:
+            if isinstance(item, (ast.Tuple, ast.List)) and item.elts:
+                item = item.elts[0]
+            if isinstance(item, ast.Constant) and isinstance(item.value, str):
+                out.add(item.value)
+    return out
+
+
+def class_constant(module: str, cls: str, name: str) -> set[str]:
+    """The same as `module_constant`, but for a constant inside a class.
+
+    Some tables live as fields of `TelegramService` rather than of the module,
+    and are invisible at the top level: an unnoticed constant would read as empty.
+    """
+    tree = ast.parse((ROOT / "tgagent" / module).read_text())
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.ClassDef) and node.name == cls):
+            continue
+        for stmt in node.body:
+            if not isinstance(stmt, ast.Assign):
+                continue
+            if not any(isinstance(t, ast.Name) and t.id == name for t in stmt.targets):
+                continue
+            value = stmt.value
+            if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+                    and value.func.id in ("frozenset", "set") and value.args):
+                value = value.args[0]
+            if isinstance(value, (ast.Set, ast.Tuple, ast.List)):
+                return {e.value for e in value.elts if isinstance(e, ast.Constant)}
+            if isinstance(value, ast.Dict):
+                return {k.value for k in value.keys if isinstance(k, ast.Constant)}
+    return set()
+
+
+def app_config_keys_used() -> set[str]:
+    """Keys of help.getAppConfig that the code reads by name.
+
+    It looks for `single.get("x")` and `limits.get("x")` calls (including through
+    `lim["limits"]`) — that is the only way this configuration is ever read. A key
+    taken by name but not declared in the core's tables is a silent loss: `.get`
+    returns None, and the capability reports itself available although it was
+    never checked.
+    """
+    used: set[str] = set()
+    for module in ("capabilities.py", "core.py"):
+        tree = ast.parse((ROOT / "tgagent" / module).read_text())
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "get" and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)):
+                continue
+            base = node.func.value
+            if isinstance(base, ast.Name):
+                holder = base.id
+            elif isinstance(base, ast.Subscript) and isinstance(base.slice, ast.Constant):
+                holder = base.slice.value
+            else:
+                continue
+            if holder in ("single", "limits"):
+                used.add(node.args[0].value)
+    # A key taken not as a literal but from the "tool -> server flag" table.
+    return used | module_dict_values("capabilities.py", "SERVER_FLAG_TOOLS")
+
+
+def module_number(module: str, name: str) -> int | None:
+    """A numeric top-level constant. By the same parse as the lists."""
+    tree = ast.parse((ROOT / "tgagent" / module).read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == name for t in node.targets
+        ):
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, int):
+                return node.value.value
+    return None
+
+
+def write_guarded_core() -> tuple[set[str], set[str]]:
+    """Core methods with a write guard: the unconditional and the conditional ones.
+
+    An unconditional `_assert_write()` as the first thing in the body — the method
+    does not work at all with TG_ALLOW_WRITE=0. A conditional one — it works, but
+    not all of it. The difference is visible only in the code, and the capabilities
+    summary promises it to the owner, so it is reconciled here.
+    """
+    src = (ROOT / "tgagent" / "core.py").read_text()
+    tree = ast.parse(src)
+    always: set[str] = set()
+    partly: set[str] = set()
+    for cls in ast.walk(tree):
+        if not (isinstance(cls, ast.ClassDef) and cls.name == "TelegramService"):
+            continue
+        for fn in cls.body:
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if "_assert_write()" not in (ast.get_source_segment(src, fn) or ""):
+                continue
+            top = any(
+                isinstance(s, ast.Expr) and isinstance(s.value, ast.Call)
+                and getattr(s.value.func, "attr", None) == "_assert_write"
+                for s in fn.body
+            )
+            (always if top else partly).add(fn.name)
+    return always, partly
 
 
 def arch_file_rows() -> dict[str, int]:
@@ -230,6 +359,53 @@ def check_counters(tools: dict[str, str], watch: set[str]) -> None:
     check(not stale, f"architecture.md: the line counts have drifted: {stale or 'none'}")
 
 
+def check_capabilities(tools: dict[str, str]) -> None:
+    """The capabilities summary: it promises numbers and lists, and it must not lie.
+
+    Everything reconciled here drifts apart silently: a new tool does not move the
+    counter, a new writing method does not show up in the list of the ones blocked
+    when writing is off, and a renamed one stays in it as a ghost.
+    """
+    total = module_number("capabilities.py", "TOOLS_TOTAL")
+    check(total == len(tools), f"capabilities.TOOLS_TOTAL: {total} against {len(tools)}")
+
+    src = (ROOT / "tgagent" / "capabilities.py").read_text()
+    phantom = sorted({t for t in re.findall(r"\btg_\w+", src) if t not in tools})
+    check(not phantom, f"capabilities.py: tools that do not exist: {phantom or 'none'}")
+
+    always, partly = write_guarded_core()
+    declared = module_constant("capabilities.py", "WRITE_TOOLS")
+    expected = {t for t, m in tools.items() if CORE_ALIASES.get(m, m) in always}
+    check(declared == expected,
+          "WRITE_TOOLS matches the unconditionally writing methods in the core "
+          f"(extra: {sorted(declared - expected) or 'none'}, "
+          f"forgotten: {sorted(expected - declared) or 'none'})")
+
+    declared_partial = module_constant("capabilities.py", "PARTIAL_WRITE_TOOLS")
+    expected_partial = {t for t, m in tools.items() if CORE_ALIASES.get(m, m) in partly}
+    check(declared_partial == expected_partial,
+          "PARTIAL_WRITE_TOOLS matches the conditionally writing methods in the core "
+          f"(extra: {sorted(declared_partial - expected_partial) or 'none'}, "
+          f"forgotten: {sorted(expected_partial - declared_partial) or 'none'})")
+
+    # Telegram caps: their names live in the core, and it is the summary that reads
+    # them. A removed or renamed key breaks nothing out loud — `.get` returns None,
+    # and the limit simply stops being checked.
+    declared_keys = (module_constant("core.py", "APP_CONFIG_LIMITS")
+                     | module_constant("core.py", "APP_CONFIG_SINGLES"))
+    unknown = sorted(app_config_keys_used() - declared_keys)
+    check(not unknown,
+          f"Telegram configuration keys not declared in the core: {unknown or 'none'}")
+
+    # Chat rights: every right the code uses has a human-readable name. Without a
+    # name the refusal is printed as a bare MTProto field.
+    rights = (module_dict_values("capabilities.py", "CHAT_TOOL_RIGHTS")
+              | class_constant("core.py", "TelegramService", "ADMIN_ONLY_RIGHTS")
+              | class_constant("core.py", "TelegramService", "BROADCAST_ADMIN_ONLY"))
+    unnamed = sorted(rights - module_constant("capabilities.py", "RIGHT_NAMES"))
+    check(not unnamed, f"chat rights with no human-readable name: {unnamed or 'none'}")
+
+
 def check_settings(disp: set[str]) -> None:
     """Settings: is every one of them described, and have the confirmation lists drifted."""
     conf_doc = (ROOT / "docs" / "configuration.md").read_text()
@@ -285,6 +461,7 @@ def main() -> int:
     check_docs(tools)
     watch = check_agents(tools)
     check_counters(tools, watch)
+    check_capabilities(tools)
     check_settings(disp)
 
     for line in notes:

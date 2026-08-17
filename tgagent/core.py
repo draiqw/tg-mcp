@@ -21,6 +21,7 @@ from telethon import TelegramClient, functions, types, utils
 from telethon.errors import FloodWaitError
 from telethon.helpers import add_surrogate, del_surrogate
 
+from . import capabilities as caps
 from . import config
 from . import memory as memory_mod
 from .index import MessageIndex
@@ -188,6 +189,63 @@ IMAGE_MIME = {
     ".webp": "image/webp",
     ".gif": "image/gif",
 }
+
+
+# Account limits that Telegram keeps in help.getAppConfig as
+# "regular account / Premium" pairs: the key here is the common part of the
+# name, to which the server appends _default and _premium. Only the pairs that
+# bound what this project can do are picked; the other few hundred config keys
+# the agent does not need and they do not go into the answer — their names are
+# visible through limits(full=True).
+APP_CONFIG_LIMITS = {
+    "dialog_filters_limit": "folders",
+    "dialog_filters_chats_limit": "chats in one folder",
+    "message_length_limit": "characters in one message",
+    "dialogs_pinned_limit": "pinned chats",
+    "dialogs_folder_pinned_limit": "pinned chats in the archive",
+    "saved_dialogs_pinned_limit": "pinned in Saved Messages",
+    "channels_limit": "groups and channels on the account",
+    "channels_public_limit": "public @ links",
+    "upload_max_fileparts": "512 KB parts in an uploaded file",
+    "caption_length_limit": "characters in a file caption",
+    "reactions_user_max": "reactions on one message",
+    "about_length_limit": "characters in the profile bio",
+    "stickers_faved_limit": "favorite stickers",
+    "saved_gifs_limit": "saved gifs",
+    "recommended_channels_limit": "similar channels in the listing",
+}
+
+# Single keys of the same configuration: they have no "regular/Premium" pair,
+# but they bear on whether a capability is available at all.
+APP_CONFIG_SINGLES = {
+    "transcribe_audio_trial_weekly_number": "free transcripts per week without Premium",
+    "transcribe_audio_trial_duration_max": "seconds in a free transcript without Premium",
+    "premium_purchase_blocked": "buying Premium is blocked for this account",
+    "group_transcribe_level_min": "group boost level at which transcription works",
+    "translations_manual_enabled": "on-demand translation is allowed",
+    "translations_auto_enabled": "automatic chat translation is allowed",
+    "reactions_uniq_max": "how many different reactions fit on one message",
+    "topics_pinned_limit": "pinned topics in a forum",
+}
+
+
+def _json_py(node: Any) -> Any:
+    """A types.Json* tree from a Telegram answer — into plain python.
+
+    The app configuration arrives not as a ready dict but as MTProto JSON-type
+    objects, and without parsing not a single value can be taken out of it.
+    """
+    if isinstance(node, types.JsonObject):
+        return {item.key: _json_py(item.value) for item in node.value}
+    if isinstance(node, types.JsonArray):
+        return [_json_py(item) for item in node.value]
+    if isinstance(node, types.JsonNull):
+        return None
+    value = getattr(node, "value", node)
+    # Numbers arrive as floats, counters included: 10.0 folders reads as a bug.
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
 
 
 def media_kinds() -> str:
@@ -3272,6 +3330,309 @@ class TelegramService:
             "auto_terminate_days": getattr(res, "authorization_ttl_days", None),
             "sessions": rows,
         }
+
+    # ---------- limits ----------
+
+    async def _app_config(self) -> dict:
+        """The app configuration in one request — the source of every cap.
+
+        A separate method because two parties read it: `limits` and
+        `capabilities`. The second may not have its own copy of the limits table
+        — otherwise "how much is allowed" and "what is available to me" would
+        drift apart on one and the same account.
+        """
+        res = await self.client(functions.help.GetAppConfigRequest(hash=0))
+        raw = _json_py(getattr(res, "config", None))
+        if not isinstance(raw, dict):
+            raise ValueError("Telegram did not hand out the app configuration")
+        return raw
+
+    async def limits(self, full: bool = False) -> dict:
+        """The caps Telegram itself sets, and which of them apply here.
+
+        The server hands out limits as "regular account / Premium" pairs, so one
+        and the same action runs into different numbers on different accounts,
+        and guessing them is not allowed. The selected pairs are handed over (see
+        APP_CONFIG_LIMITS) with the value in force already substituted.
+        `full=True` adds every pair found and the names of the other config keys
+        — that is for hunting for a limit, not for checking a known one.
+        """
+        raw = await self._app_config()
+        premium = bool(getattr(self.me, "premium", False))
+
+        pairs: dict[str, tuple[Any, Any]] = {}
+        for key, value in raw.items():
+            base = key[: -len("_default")] if key.endswith("_default") else None
+            if base is not None and f"{base}_premium" in raw:
+                pairs[base] = (value, raw[f"{base}_premium"])
+
+        def row(base: str, what: str | None = None) -> dict:
+            default, prem = pairs[base]
+            out = {"default": default, "premium": prem, "value": prem if premium else default}
+            if what:
+                out["what"] = what
+            return out
+
+        result: dict[str, Any] = {
+            "account": self.account,
+            "premium": premium,
+            "limits": {
+                base: row(base, what)
+                for base, what in APP_CONFIG_LIMITS.items()
+                if base in pairs
+            },
+            "single": {
+                key: raw[key] for key in APP_CONFIG_SINGLES if key in raw
+            },
+        }
+        # Telegram may rename or drop a key; a limit that vanished silently
+        # would look like "there is no restriction".
+        gone = [b for b in APP_CONFIG_LIMITS if b not in pairs]
+        gone += [k for k in APP_CONFIG_SINGLES if k not in raw]
+        if gone:
+            result["not_reported"] = gone
+        if full:
+            result["all_pairs"] = {base: row(base) for base in sorted(pairs)}
+            paired = {f"{b}{s}" for b in pairs for s in ("_default", "_premium")}
+            # Nested values (domain lists, currency tables) do not go into the
+            # answer: they are what bloats the configuration, and they have
+            # nothing to do with access.
+            result["other"] = {
+                k: (v if isinstance(v, (str, int, float, bool)) or v is None
+                    else f"<{type(v).__name__}, {len(v)}>")
+                for k, v in sorted(raw.items()) if k not in paired
+            }
+        return result
+
+    # ---------- capabilities ----------
+
+    # Rights an ordinary member never has at all: they are not "left untaken",
+    # they have to be granted. Without this list the absence of a ban would read
+    # as a permission.
+    ADMIN_ONLY_RIGHTS = frozenset({
+        "admin", "ban_users", "delete_messages", "edit_messages",
+        "post_messages", "add_admins",
+    })
+
+    # In a channel (not a supergroup) a member is a reader: what in a group is
+    # governed by the common chat permissions is here granted by adminship only.
+    BROADCAST_ADMIN_ONLY = frozenset({
+        "change_info", "invite_users", "pin_messages", "manage_topics",
+    })
+
+    async def capabilities(self, chat: Any = None) -> dict:
+        """What is available to this agent and why not — sorted by the nature of
+        the refusal.
+
+        Answers two questions at once: for the owner after signing in — "what is
+        my level and what did I get", for the agent before acting — "is the
+        capability available and what does it take to make it so". The
+        restrictions are not heaped together: the subscription, the server caps,
+        the local setting and the rights in a chat are kept apart, because they
+        are fixed in different ways, and every unavailable tool has both a reason
+        and an action.
+
+        `chat` adds the breakdown of one chat: the role, whether one can write
+        there, which reactions are allowed, whether slowmode is on. Only with it
+        and only then does a request about the chat go out — the account level
+        does not depend on a chat, and there is nothing to pay an extra call to
+        Telegram for.
+        """
+        lim = await self.limits()
+        data = caps.build(
+            whoami=self.whoami_dict(),
+            premium=bool(lim["premium"]),
+            limits=lim["limits"],
+            single=lim["single"],
+        )
+        if chat is not None:
+            data["chat"] = await self._chat_rights(chat, lim)
+            # The advice about the chat lands in the common "what to do" list:
+            # the reader needs one list of actions, not two in different places
+            # of the answer.
+            steps = data["summary"]["next_steps"]
+            for tool in data["chat"]["tools"]:
+                if not tool["available"] and tool["fix"] and tool["fix"] not in steps:
+                    steps.append(tool["fix"])
+        return data
+
+    def _right_allowed(
+        self, right: str, creator: bool, admin, banned, default,
+        admin_only: frozenset[str] | set[str] | None = None,
+    ) -> bool:
+        """Whether we hold a right in this chat.
+
+        The order matters: the creator may do everything, granted adminship
+        overrides the general ban of the chat, and a personal restriction
+        overrides both. In ChatBannedRights `True` means "forbidden", not
+        "allowed", so the absence of a ban is a permission — but only for those
+        rights a member can have at all: `admin_only` lists the rest.
+        """
+        if creator:
+            return True
+        if right == "admin":
+            return admin is not None
+        if admin is not None and getattr(admin, right, False):
+            return True
+        if banned is not None and getattr(banned, right, False):
+            return False
+        if default is not None and getattr(default, right, False):
+            return False
+        return right not in (self.ADMIN_ONLY_RIGHTS if admin_only is None else admin_only)
+
+    @staticmethod
+    def _reactions_view(available) -> str:
+        if isinstance(available, types.ChatReactionsAll):
+            return "any"
+        if isinstance(available, types.ChatReactionsSome):
+            return ", ".join(str(reaction_of(r)) for r in available.reactions) or "none"
+        if isinstance(available, types.ChatReactionsNone):
+            return "disabled in this chat"
+        return "any"
+
+    async def _chat_rights(self, chat: Any, lim: dict) -> dict:
+        """The rights in one particular chat — the fourth nature of restrictions.
+
+        The only part of the digest that needs a request about the chat:
+        everything else concerns the account as a whole and does not depend on a
+        chat.
+        """
+        ent = await self.resolve(chat)
+        max_reactions = (lim["limits"].get("reactions_user_max") or {}).get("value") or 1
+        out: dict[str, Any] = {
+            "nature": caps.NATURES["chat"],
+            "reactions_per_message": max_reactions,
+        }
+
+        if ent == "me":
+            out.update({
+                "id": self.me.id, "title": "Saved Messages", "kind": "saved",
+                "role": "this is your own chat", "can_write": True,
+                "why_not": None, "slowmode_sec": None, "reactions": "any",
+                "admin_rights": None, "everyone_forbidden": [], "tools": [],
+            })
+            return out
+
+        ent = await self.client.get_entity(ent)
+        out["id"] = utils.get_peer_id(ent)
+        out["title"] = entity_name(ent)
+        creator = bool(getattr(ent, "creator", False))
+        admin = getattr(ent, "admin_rights", None)
+        banned = getattr(ent, "banned_rights", None)
+        default = getattr(ent, "default_banned_rights", None)
+        needed = dict(caps.CHAT_TOOL_RIGHTS)
+
+        if isinstance(ent, types.User):
+            out["kind"] = "direct chat"
+            out["role"] = "the other person"
+            out["slowmode_sec"] = None
+            out["reactions"] = "any"
+            out["admin_rights"] = None
+            out["everyone_forbidden"] = []
+            # A DM can be closed: the other person allowed writing only to
+            # contacts and to Premium holders. That is the seam of two natures —
+            # the subscription and the chat — and it is visible only here.
+            blocked_why = None
+            if getattr(ent, "deleted", False):
+                blocked_why = "the account is deleted"
+            else:
+                try:
+                    full = await self.client(functions.users.GetFullUserRequest(ent))
+                    if (getattr(full.full_user, "contact_require_premium", False)
+                            and not bool(getattr(self.me, "premium", False))
+                            and not getattr(ent, "contact", False)):
+                        blocked_why = ("the other person accepts messages only from "
+                                       "contacts and from accounts with Premium")
+                except Exception:
+                    pass
+            out["can_write"] = blocked_why is None
+            out["why_not"] = blocked_why
+            out["tools"] = [] if blocked_why is None else [
+                {"tool": tool, "available": False, "why": blocked_why,
+                 "fix": "Telegram Premium is needed, or ask to be added to contacts"}
+                for tool in ("tg_send", "tg_send_file")
+            ]
+            return out
+
+        full_chat = None
+        admin_only = set(self.ADMIN_ONLY_RIGHTS)
+        if isinstance(ent, types.Channel):
+            out["kind"] = ("forum" if getattr(ent, "forum", False)
+                           else "supergroup" if getattr(ent, "megagroup", False)
+                           else "channel")
+            try:
+                res = await self.client(functions.channels.GetFullChannelRequest(channel=ent))
+                full_chat = res.full_chat
+            except Exception as exc:
+                out["full_error"] = tg_error_text(exc)
+            if not getattr(ent, "megagroup", False):
+                # In a channel an ordinary member does not write at all: the
+                # right to publish is granted by adminship, not by the absence
+                # of a ban.
+                for tool in ("tg_send", "tg_send_file", "tg_poll", "tg_send_sticker"):
+                    needed[tool] = "post_messages"
+                admin_only |= self.BROADCAST_ADMIN_ONLY
+            if not getattr(ent, "forum", False):
+                needed.pop("tg_topic_create", None)
+                needed.pop("tg_topic_edit", None)
+        else:
+            out["kind"] = "group"
+            try:
+                res = await self.client(functions.messages.GetFullChatRequest(chat_id=ent.id))
+                full_chat = res.full_chat
+            except Exception as exc:
+                out["full_error"] = tg_error_text(exc)
+            needed.pop("tg_topic_create", None)
+            needed.pop("tg_topic_edit", None)
+
+        out["slowmode_sec"] = getattr(full_chat, "slowmode_seconds", None)
+        out["reactions"] = self._reactions_view(
+            getattr(full_chat, "available_reactions", None)
+        )
+        out["role"] = (
+            "creator" if creator
+            else "admin" if admin is not None
+            else "member with restrictions" if banned is not None
+            else "left the chat" if getattr(ent, "left", False)
+            else "member"
+        )
+        out["admin_rights"] = sorted(
+            caps.RIGHT_NAMES.get(k, k)
+            for k in caps.RIGHT_NAMES
+            if admin is not None and getattr(admin, k, False)
+        ) or None
+        out["everyone_forbidden"] = sorted(
+            caps.RIGHT_NAMES.get(k, k)
+            for k in caps.RIGHT_NAMES
+            if default is not None and getattr(default, k, False)
+        )
+        out["can_write"] = self._right_allowed(
+            needed["tg_send"], creator, admin, banned, default, admin_only
+        )
+        out["why_not"] = None if out["can_write"] else (
+            f"no \"{caps.RIGHT_NAMES[needed['tg_send']]}\" right in this chat"
+        )
+
+        tools = []
+        for tool, right in sorted(needed.items()):
+            ok = self._right_allowed(right, creator, admin, banned, default, admin_only)
+            if right == "send_reactions" and out["reactions"] == "disabled in this chat":
+                ok = False
+            tools.append({
+                "tool": tool,
+                "available": ok,
+                "right": right,
+                "why": None if ok else f"no \"{caps.RIGHT_NAMES[right]}\" right",
+                "fix": None if ok else (
+                    "admin rights in this chat are needed — only the chat owner can "
+                    "grant them"
+                    if right in admin_only
+                    else "the right was taken away in the chat settings; an admin can "
+                         "give it back"
+                ),
+            })
+        out["tools"] = tools
+        return out
 
     # ---------- stickers, gifs, forums, admin log ----------
 

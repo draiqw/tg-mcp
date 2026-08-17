@@ -2,18 +2,19 @@
 
 ## Where the core is
 
-`tgagent/core.py`, ~4600 lines, class `TelegramService`. This is the only place where
+`tgagent/core.py`, ~5000 lines, class `TelegramService`. This is the only place where
 the code talks to Telegram. Everything else is transport and scaffolding:
 
 | File | Lines | Role |
 |---|---|---|
-| **`tgagent/core.py`** | 4679 | **core: all account operations, chat resolution, limits** |
-| `tgagent/daemon.py` | 1758 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
-| `tgagent/mcp_server.py` | 1452 | 77 tools, each one a single call to the daemon |
+| **`tgagent/core.py`** | 5040 | **core: all account operations, chat resolution, limits** |
+| `tgagent/daemon.py` | 1767 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
+| `tgagent/mcp_server.py` | 1498 | 79 tools, each one a single call to the daemon |
 | `tgagent/index.py` | 670 | local index of the correspondence: sqlite + FTS5, Russian morphology |
 | `tgagent/memory.py` | 234 | chat dossiers: file format, prompt, language-model call |
-| `tgagent/cli.py` | 525 | setup, sign-in, daemon control |
+| `tgagent/cli.py` | 587 | setup, sign-in, daemon control |
 | `tgagent/config.py` | 341 | paths, `.env`, rules, limits |
+| `tgagent/capabilities.py` | 750 | tables of "what a given tool needs", checks of the local setup, summary text |
 | `tgagent/alerts.py` | 138 | Bot API: alerts, commands, buttons under the agent's questions |
 
 The rule is simple: a new capability goes into `core.py` as a `TelegramService`
@@ -27,6 +28,15 @@ the second is the dossier file format and the language-model call; they are used
 the `core.index()` and `core.memory()` methods, exactly as `alerts.py` knows the Bot
 API and `config.py` knows about paths. The logic of "what to download, how far and
 when to stop" stayed in the core.
+
+`capabilities.py` is of the same breed: it knows what a given tool needs, can check
+the local half (keys, the bot, the installed extra, the write mode) and turn all of
+that into human text, but it does not talk to Telegram. The subscription and the
+server-side caps are filled in by `core.capabilities()`, and the rights in a chat
+too, because you have to go to Telegram for them. The split is not cosmetic: without
+it `tg setup` and `tg login` could not show the summary before the daemon's first
+run — and that is exactly the moment when the owner does not yet understand what he
+has got.
 
 The exception is four tools that live in the daemon rather than in the core: `tg_wait`
 waits for an incoming message, `tg_ask` — for the owner's answer, `tg_remind` defers a
@@ -212,7 +222,17 @@ them, and therefore drifts apart especially quietly:
 - the `CONFIRM_KEYS` have default values, `CONFIRM_OUTBOUND` consists of writing
   methods, and everything writing plus `AUDIT_ONLY` is in `dispatch_table`;
 - the filters' actions (`AUTO_ACTIONS`) and the methods that are silent in `outgoing`
-  mode are listed in the documentation by name.
+  mode are listed in the documentation by name;
+- the capabilities summary in full: `TOOLS_TOTAL` equals the number of tools, all the
+  names in `capabilities.py` exist, `WRITE_TOOLS` and `PARTIAL_WRITE_TOOLS` match what
+  is closed by `_assert_write()` in the core fully and partly, the Telegram
+  configuration keys are declared in the core's tables, and every right in a chat has a
+  human-readable name. The summary promises the owner numbers and lists; it would get them
+  wrong silently.
+
+One selfcheck is not enough for the summary by agreement: the names of the rights are
+Telethon fields, and their existence is checked by a test, because for that Telethon has
+to be imported.
 
 The script stays a static analysis: it reads the sources through `ast` instead of
 importing them, so it does not pull in Telethon and works without a running daemon.

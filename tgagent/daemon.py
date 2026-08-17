@@ -26,6 +26,7 @@ from telethon import events, utils
 from telethon.tl import types
 
 from . import alerts, config
+from . import capabilities as caps
 from .core import SAVED_ALIASES, GuardError, TelegramService, entity_name
 from .core import _parse_since as parse_since
 from .core import _parse_when as parse_when
@@ -1301,6 +1302,11 @@ class Daemon:
                     f"Rules: {'paused' if self.paused else 'active'}",
                     chat_id,
                 )
+            elif cmd in ("can", "capabilities"):
+                # The same text `tg login` and `tg capabilities` print: the owner
+                # must not see two different pictures of one installation.
+                text = caps.render(await self.tg.capabilities(chat=arg or None))
+                await self.bot.send("<pre>" + html.escape(text) + "</pre>", chat_id)
             elif cmd == "unread":
                 rows = await self.tg.unread_summary(limit_chats=10, per_chat=2)
                 if not rows:
@@ -1506,6 +1512,8 @@ class Daemon:
             "stickers": t.stickers,
             "stories": t.stories,
             "sessions": t.sessions,
+            "limits": t.limits,
+            "capabilities": t.capabilities,
             "summarize": t.summarize,
             "saved_tags": t.saved_tags,
             "wait": self.wait,
@@ -1735,6 +1743,7 @@ CONFIRM_YES = {"allow", "yes", "y", "ok", "okay", "+", "go", "go ahead", "do it"
 HELP_TEXT = (
     "<b>Telegram agent</b>\n"
     "/status — state\n"
+    "/can — what the agent can reach and what is missing\n"
     "/unread — unread\n"
     "/actions — what the agent did\n"
     "/rules — current alert rules\n"

@@ -1,6 +1,6 @@
 # telegram-mcp
 
-An MCP server on top of a **personal** Telegram account: 77 tools, MTProto, not the Bot API.
+An MCP server on top of a **personal** Telegram account: 79 tools, MTProto, not the Bot API.
 
 ## What it is
 
@@ -54,7 +54,7 @@ MCP client (Claude Code, Claude Desktop, any other)
         │  stdio
         ▼
 tgagent.mcp_server ──unix socket──▶ tgagent.daemon ──MTProto──▶ Telegram
-     77 tools         /data/daemon.sock      │
+     79 tools         /data/daemon.sock      │
                                              ├─ watcher: incoming → filters → alert
                                              ├─ digest on a schedule
                                              ├─ reminders and waiting
@@ -85,7 +85,8 @@ You need Python 3.13 and [uv](https://docs.astral.sh/uv/).
 4. **Setup and sign-in.** `tg setup` asks for the keys and the token and writes them into
    `.env` (`api_hash` and the token are typed hidden). `tg login` asks for the phone, the
    code from Telegram and, if 2FA is on, the cloud password — all of it typed by hand in
-   your own terminal.
+   your own terminal. Both commands print a summary at the end: what level the account has,
+   what is already configured, what is missing and what to do about it.
 
    ```bash
    uv run tg setup
@@ -98,6 +99,7 @@ You need Python 3.13 and [uv](https://docs.astral.sh/uv/).
    ```bash
    uv run tg daemon start
    uv run tg status       # what is configured, what is not, whether the daemon is alive
+   uv run tg capabilities # what is available to you, what is blocked and by what exactly
    ```
 
 6. **Connecting to Claude Code:**
@@ -159,6 +161,7 @@ Read this before you start, not after. In full: [SECURITY.md](SECURITY.md) and
 
 ```bash
 uv run tg status                      # what is configured, what is not, the state of the daemon
+uv run tg capabilities                # what is available, what is not and what to do about it
 uv run tg setup                       # the keys and the bot token
 uv run tg login                       # the whole sign-in
 uv run tg send-code +7XXXXXXXXXX      # the same in three steps, without the interactive part

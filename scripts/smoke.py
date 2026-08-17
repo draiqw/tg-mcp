@@ -67,6 +67,11 @@ CASES: list[tuple] = [
     ("saved_tags", {}),
     ("stories", {}),
     ("sessions", {}),
+    ("limits", {}),
+    ("capabilities", {}),
+    # With a chat one extra request appears that is absent otherwise — the rights
+    # in that particular chat. Checked on Saved Messages: nobody asks for them there.
+    ("capabilities", {"chat": PROBE}, "by chat"),
     ("contacts", {"kind": "top", "limit": 5}),
     ("contacts", {"kind": "birthdays", "limit": 5}),
     ("contacts", {"kind": "online", "limit": 5}),

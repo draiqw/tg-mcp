@@ -1,6 +1,6 @@
 # MCP tools
 
-77 tools. Each one is a thin wrapper over a core method; all the logic is in
+79 tools. Each one is a thin wrapper over a core method; all the logic is in
 `tgagent/core.py`.
 
 ## Accounts
@@ -18,7 +18,7 @@ background watcher listens to all accounts at once either way.
 
 Everywhere a parameter is called `chat`, any of these is accepted:
 
-- a numeric id — `222222222`, `-1002474960404`
+- a numeric id — `222222222`, `-1001111111111`
 - `@username`
 - a link `https://t.me/username`
 - the exact chat title
@@ -72,6 +72,90 @@ The `confirm_*` keys in the rules are always shown from disk, not from the
 daemon's memory: the confirmation mode is edited by file and takes effect
 immediately, so a status showing a stale `off` would lie in the least convenient
 direction.
+
+### `tg_limits(full=False)`
+
+The access level on Telegram's side: whether the account has Premium and which
+caps follow from that. The server keeps almost every limit as a pair, "ordinary
+account / Premium", and returns them in `help.getAppConfig`, so the same action
+on different accounts runs into different numbers, and they cannot be guessed.
+Every limit in the answer carries all three values: `default`, `premium` and
+`value` — the one in force here and now.
+
+The limits picked are the ones this project's features run into: folders and
+chats per folder, message and caption length, pinned chats (in the list, in the
+archive, in Saved Messages), the number of groups and channels, public links,
+upload file size (in 512 KB parts), the number of reactions on one message,
+favourite stickers and GIFs, the length of the profile bio, the size of the
+similar-channels list. Separately there are single values with no pair: how many
+free transcriptions a week an account without Premium is entitled to, whether
+translation is allowed, from which boost level transcription works in a group,
+how many different reactions fit on one message, how many topics can be pinned
+in a forum.
+
+`full=True` adds every "ordinary/Premium" pair found in the configuration and
+its remaining keys with their values (nested lists and tables are replaced by a
+note about the type). This is the search mode: needed when a limit is being
+looked for, not when a known one is being checked.
+
+The local part of the access level does not belong here — whether writing is
+allowed, whether the bot is configured, which transcription keys exist, that is
+`tg_status`. The assembled answer to "what is available to me and why not" is
+`tg_capabilities`.
+
+### `tg_capabilities(chat=None)`
+
+What is available to the agent, what is not, and what has to be done for it to
+become available. It answers two readers at once: the owner after signing in —
+"what level do I have and what did I get", and the model before acting — "is
+this possible at all". Asking is cheaper than calling a tool and parsing its
+error.
+
+The answer starts with the bottom line: how many tools out of the total are
+available, how many are blocked and for which reasons. Then the details, laid
+out by the four natures of restriction — they must not be mixed, because each is
+cured differently:
+
+| Nature | What it is | How it is cured |
+|---|---|---|
+| subscription | Telegram Premium | bought; there is no local way around it |
+| server cap | numbers from `help.getAppConfig` | not curable, but worth knowing in advance |
+| local setting | `TG_ALLOW_WRITE`, keys in `.env`, the bot, `confirm_writes`, the `local-whisper` extra | the owner fixes it in a minute |
+| rights in the chat | admin status, chat restrictions, slowmode | depends on the chat and does not carry over to another |
+
+Every unavailable tool in the answer carries both a reason and an action:
+"Premium required", "add `OPENAI_API_KEY` to `.env`", "turn on
+`TG_ALLOW_WRITE=1`", "admin rights in this chat required". Tools where only part
+of the work writes (`tg_stories` with `mark_read`, `tg_scheduled` with
+`cancel_ids`, `tg_sessions` with `terminate`, `tg_memory` with
+`action="update"`) are marked as reduced, not blocked: reading with them still
+works.
+
+Limits are taken from Telegram's answer, not out of thin air, and are shown as a
+pair of numbers: how many are allowed now and how many there would be at the
+other subscription level — "20 folders, without Premium it would be 10". That is
+a fact about this particular account, not an advertisement for the subscription,
+and the limits Premium does not move are listed separately.
+
+The local part is checked by fact, not by intent: a key in `.env` is either there
+or not (key values never go into the answer — only "set"/"not set"), the bot is
+either linked or merely created, the `local-whisper` extra is either installed or
+not — and that is asked of the interpreter itself, not read from
+`pyproject.toml`. The case where writing is allowed but `confirm_writes` is on
+without a configured bot is handled separately: there is nobody to ask for
+permission, so writing is in fact locked.
+
+`chat` adds the breakdown of one chat: the role (creator, admin, member,
+restricted), whether you can write there and why not, which reactions are
+allowed, whether slowmode is on, which rights are granted and which are taken
+away from everyone. This is the **only** part of the answer that needs a request
+about a particular chat, which is why without `chat` no such request is made: the
+account level does not depend on the chat, and paying for it with an extra call
+to Telegram is pointless.
+
+The same answer in human wording is printed by `uv run tg capabilities`, by the
+tail of `tg login` and by `tg setup`, and by the bot command `/can` (with an
+argument — about a particular chat).
 
 ## Reading
 
@@ -948,7 +1032,7 @@ limits.
 
 ## What is deliberately missing
 
-The MTProto map (layer 227) is wider than these 77 tools, and part of it is
+The MTProto map (layer 227) is wider than these 79 tools, and part of it is
 deliberately not taken — that is a decision, not a gap:
 
 | What | Why not |

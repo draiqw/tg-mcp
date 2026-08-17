@@ -24,6 +24,19 @@ def _p(msg: str = "") -> None:
     print(msg, flush=True)
 
 
+def _onboarding(title: str, account: str | None = None) -> None:
+    """Tail of setup and login: what came out and what is still missing.
+
+    Printed where a person has just configured something and does not understand
+    what exactly they got. The same text is available on its own:
+    `uv run tg capabilities`.
+    """
+    _p("\n" + "─" * 60)
+    _p(title + "\n")
+    _p(capabilities_text(account))
+    _p("─" * 60)
+
+
 # ---------------------------------------------------------------- setup
 
 
@@ -46,9 +59,9 @@ def cmd_setup(args) -> int:
     config.write_env(values)
     _p(f"\n   Written to {config.ENV_FILE}")
 
-    if bot_token:
-        return asyncio.run(_link_bot(bot_token))
-    return 0
+    code = asyncio.run(_link_bot(bot_token)) if bot_token else 0
+    _onboarding("What is set up so far")
+    return code
 
 
 async def _link_bot(token: str) -> int:
@@ -115,6 +128,7 @@ async def _login(args) -> int:
         me = await client.get_me()
         _p(f"Already signed in: {me.first_name} (@{me.username}). The session is in place.")
         await client.disconnect()
+        _onboarding("What you can do", getattr(args, "account", None))
         return 0
 
     # Blocking the loop on the two lines below is the whole point of the step: this
@@ -138,7 +152,12 @@ async def _login(args) -> int:
         session_file.chmod(0o600)
     _p(f"\nDone: signed in as {me.first_name} (@{me.username}, id {me.id}).")
     _p("Session: " + str(session_file))
+    # The account tier is known right here: it is a flag of the user who has just
+    # signed in, no extra request is needed for it. The caps that follow from it
+    # are shown by `tg capabilities` — those need a running daemon.
+    _p("Telegram Premium: " + ("yes" if getattr(me, "premium", False) else "no"))
     _p("Next: uv run tg daemon start")
+    _onboarding("What you can do", getattr(args, "account", None))
     return 0
 
 
@@ -429,6 +448,46 @@ def cmd_status(args) -> int:
     return 0
 
 
+def capabilities_text(account: str | None = None) -> str:
+    """Digest of "what is available", in human text.
+
+    The full one goes through the daemon: only the server knows the subscription
+    and the Telegram caps. Without the daemon (and right after `tg setup` and
+    `tg login` there usually is none) the local half is shown, with an honest
+    note about what is missing from it.
+    """
+    from . import capabilities as caps
+
+    head = ""
+    if config.SOCKET.exists():
+        try:
+            return caps.render(asyncio.run(_rpc("capabilities", account=account)))
+        except Exception as exc:
+            # A separate case, because after an update it is the most frequent
+            # one: the daemon is spinning on code that did not have this method
+            # yet. The phrase matched here is the wording the daemon replies
+            # with — the two sides have to stay in step.
+            head = ("The daemon is running an old version of the code — restart it: "
+                    "uv run tg daemon restart.\n\n"
+                    if "does not know method" in str(exc)
+                    else f"The daemon did not answer ({exc}).\n\n")
+    else:
+        head = ("The daemon is not running — run `uv run tg daemon start`, "
+                "then `uv run tg capabilities`.\n\n")
+    local = caps.local_state()
+    rows = caps.restrictions(local)
+    return head + caps.render({
+        "local": {"nature": caps.NATURES["local"], **local},
+        "summary": caps.summary(rows, partial=True),
+        "restricted": rows,
+    })
+
+
+def cmd_capabilities(args) -> int:
+    _p(capabilities_text(getattr(args, "account", None)))
+    return 0
+
+
 async def _rpc(method: str, params: dict | None = None, account: str | None = None):
     # Parameters go as a dict, not as **kwargs: the tools have a `method`
     # parameter (`tg_actions`), and on **kwargs such a call would fail with
@@ -499,6 +558,9 @@ def main() -> None:
     sub.add_parser("accounts", help="which accounts are signed in").set_defaults(
         fn=cmd_accounts
     )
+    with_account(
+        sub.add_parser("capabilities", help="what is available and what is missing")
+    ).set_defaults(fn=cmd_capabilities)
 
     d = sub.add_parser("daemon", help="daemon control")
     dsub = d.add_subparsers(dest="action", required=True)

@@ -1347,6 +1347,52 @@ async def tg_summarize(
 
 
 @mcp.tool()
+async def tg_limits(full: bool = False) -> str:
+    """What this account is allowed to do: Premium flag and the server-side
+    ceilings that go with it.
+
+    Telegram keeps most limits as a pair — one number for a plain account, a
+    larger one for Premium — so the same action fails at different points on
+    different accounts. Read this before promising the owner something that may
+    be out of reach (more folders, more pinned chats, a bigger file, several
+    reactions on one message), instead of guessing or trying and failing.
+    Local setup (write mode, bot, transcription keys) is in tg_status, not here.
+
+    Args:
+        full: also return every default/premium pair Telegram reports and the
+              names of the remaining config keys. Use only when hunting for a
+              limit that is not in the curated list; the answer gets long.
+    """
+    return j(await call("limits", full=full))
+
+
+@mcp.tool()
+async def tg_capabilities(chat: str | None = None) -> str:
+    """What this agent can and cannot do here, and what would unblock the rest.
+
+    Start here when you are unsure whether something is possible at all — it is
+    cheaper than trying a tool and reading its error. The answer opens with a
+    count ("N of M tools available, K blocked") and then splits the blockers by
+    nature, because they are fixed in completely different ways: a Telegram
+    Premium subscription, a server-side ceiling that cannot be lifted, this
+    installation's own setup (a key in .env, the notification bot, write mode),
+    and rights inside one particular chat. Every blocked tool comes with both a
+    reason and the one action that removes it.
+
+    Ceilings are read from Telegram itself, not guessed, and are shown next to
+    the other tier's number, so "20 folders, 10 without Premium" is a fact about
+    this account rather than an advertisement.
+
+    Args:
+        chat: also report this chat (id, @username, exact title or "me"): the
+              role there, whether messages can be sent, which reactions the chat
+              allows, whether slowmode is on. Only this part costs a request
+              about a chat, so pass it only when the question is about that chat.
+    """
+    return j(await call("capabilities", chat=chat))
+
+
+@mcp.tool()
 async def tg_sessions(terminate: int | None = None) -> str:
     """Devices where this Telegram account is logged in: model, app, IP, country,
     when each was last active.

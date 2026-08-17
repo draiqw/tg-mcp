@@ -31,6 +31,7 @@ Three things, in decreasing order of danger:
 | a list of candidates instead of guessing | `core.resolve` | a message to the wrong person because of a similar name |
 | ignoring your own bot | `daemon.alert_reason` | an alert loop until FloodWait |
 | bot commands only from your own chat | `daemon.bot_loop` | an outsider driving the agent |
+| "set / not set" instead of the key value | `capabilities.local_state` | a key from `.env` in the model context, in the terminal and in the chat with the bot |
 | a closed list of filter actions | `config.AUTO_ACTIONS`, checked in `validate_auto` | an auto-reply to an outsider caused by a wrong rule: there is no sending to live people among the actions |
 | `confirm_*` and `LIMITS` are not editable through MCP | `daemon.set_rules`, `config.save_rules` | an agent lifting its own restriction |
 | `actions.jsonl` | `daemon.append_action`, read by `tg_actions` and `/actions` | "who sent this" after the fact |

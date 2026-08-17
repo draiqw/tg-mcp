@@ -343,7 +343,7 @@ action.
     },
     {
       "name": "noisy chat to a folder",
-      "chat": -1001162943519,
+      "chat": -1004444444444,
       "action": "folder",
       "folder": "Noise",
       "enabled": false
@@ -460,6 +460,7 @@ Accepted only from the `TG_ALERT_CHAT_ID` chat, the rest are logged and ignored.
 
 ```
 /status        the agent's state
+/can [chat]    what is available and what is missing; with a chat — also the rights in it
 /unread        unread
 /actions       what the agent did: the last ten writing calls
 /rules         the current rules
@@ -470,7 +471,9 @@ Accepted only from the `TG_ALERT_CHAT_ID` chat, the rest are logged and ignored.
 ```
 
 `/pause` lives in the daemon's memory and is reset on restart; `/watch` and
-`/mute` are written into `rules.json` and outlive it.
+`/mute` are written into `rules.json` and outlive it. `/can` answers with the same
+text that `uv run tg capabilities` and the tail of `tg login` print: one
+installation — one picture, not three different ones.
 
 ## State files
 
