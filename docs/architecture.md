@@ -7,12 +7,13 @@ the code talks to Telegram. Everything else is transport and scaffolding:
 
 | File | Lines | Role |
 |---|---|---|
-| **`tgagent/core.py`** | 4385 | **core: all account operations, chat resolution, limits** |
-| `tgagent/daemon.py` | 1655 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
-| `tgagent/mcp_server.py` | 1410 | 76 tools, each one a single call to the daemon |
+| **`tgagent/core.py`** | 4505 | **core: all account operations, chat resolution, limits** |
+| `tgagent/daemon.py` | 1746 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
+| `tgagent/mcp_server.py` | 1445 | 77 tools, each one a single call to the daemon |
 | `tgagent/index.py` | 669 | local index of the correspondence: sqlite + FTS5, Russian morphology |
+| `tgagent/memory.py` | 234 | chat dossiers: file format, prompt, language-model call |
 | `tgagent/cli.py` | 520 | setup, sign-in, daemon control |
-| `tgagent/config.py` | 305 | paths, `.env`, rules, limits |
+| `tgagent/config.py` | 340 | paths, `.env`, rules, limits |
 | `tgagent/alerts.py` | 125 | Bot API: alerts, commands, buttons under the agent's questions |
 
 The rule is simple: a new capability goes into `core.py` as a `TelegramService`
@@ -20,11 +21,12 @@ method, gets registered in the daemon's `dispatch_table()` and is wrapped by a
 tool in `mcp_server.py`. Three lines on three levels, the logic — only in the core.
 `scripts/selfcheck.py` watches that these three levels do not drift apart.
 
-`index.py` does not break the rule: it does not talk to Telegram and does not know
-about Telethon at all. It is storage — sqlite, FTS5, a stemmer — used by the
-`core.index()` method, exactly as `alerts.py` knows the Bot API and `config.py` knows
-about paths. The logic of "what to download, how far and when to stop" stayed in the
-core.
+`index.py` and `memory.py` do not break the rule: they do not talk to Telegram and
+do not know about Telethon at all. The first is storage (sqlite, FTS5, a stemmer),
+the second is the dossier file format and the language-model call; they are used by
+the `core.index()` and `core.memory()` methods, exactly as `alerts.py` knows the Bot
+API and `config.py` knows about paths. The logic of "what to download, how far and
+when to stop" stayed in the core.
 
 The exception is four tools that live in the daemon rather than in the core: `tg_wait`
 waits for an incoming message, `tg_ask` — for the owner's answer, `tg_remind` defers a
@@ -32,9 +34,9 @@ reminder, `tg_actions` reads the action log. None of them needs a call to Telegr
 they need the event stream, the bot channel and the daemon's files, which is exactly
 what the daemon owns.
 
-For the same reason two things live in the daemon that have no tool at all:
-inbox filters and the scheduled digest. They cannot be made into a tool — they work
-when Claude is not running, and they are
+For the same reason three things live in the daemon that have no tool at all:
+inbox filters, the scheduled digest and the automatic refresh of chat dossiers. They
+cannot be made into a tool — they work when Claude is not running, and they are
 configured by rules in `rules.json` through `tg_rules`. The filters' actions themselves
 still go through ordinary core methods.
 
@@ -113,6 +115,14 @@ digest. An empty digest is not sent.
 **A command from the phone.** The bot is polled with long-poll in `bot_loop()`;
 commands are accepted only from the chat `TG_ALERT_CHAT_ID`, messages from any other
 chat are logged and ignored.
+
+**Chat dossiers.** The watcher counts messages per chat (`note_for_memory`), and
+`memory_loop()` looks once a minute for where more than `memory_after` has piled up
+and refreshes the dossier. In a separate tick, not right in the incoming-message
+handler: a refresh is a network call to a language model, and for its duration the
+watcher would start falling behind the message stream. The `memory_max_per_hour` cap
+is counted from a list in the daemon's memory — this is the agent's only opportunity
+to spend money, and it is limited.
 
 **A reminder.** `reminder_loop()` ticks once every half minute and sends through the
 bot everything whose time has come; the queue lies in `data/reminders.json`, so it

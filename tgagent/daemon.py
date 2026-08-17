@@ -34,6 +34,9 @@ from .core import reaction_of as core_reaction_of
 MAX_EVENT_LOG_BYTES = 20 * 1024 * 1024
 REMINDER_TICK_SEC = 30
 DIGEST_TICK_SEC = 30
+# A dossier is refreshed less often: it is a call to a language model, not a
+# local check.
+MEMORY_TICK_SEC = 60
 # The daemon was down longer — a "since morning" digest arriving in the evening
 # is not a digest any more but junk: the slot is marked passed and nothing is
 # sent.
@@ -77,6 +80,10 @@ class Daemon:
         self.digest_state: dict = {}
         # Chat-level filter actions already carried out in this life of the daemon.
         self._auto_done: set[tuple[str, str, int]] = set()
+        # How many messages have piled up in a chat since the last dossier update
+        # and when dossiers were updated — the hourly cap is counted from this list.
+        self.memory_pending: dict[tuple[str, int], dict] = {}
+        self.memory_done: list[float] = []
         # Our own alert bot writes into this account too. Never alert on its
         # messages: the alert would arrive as a new incoming message and loop.
         token = config.bot_token()
@@ -352,6 +359,7 @@ class Daemon:
                 "link": link,
             }
             self.feed_waiters(ev)
+            self.note_for_memory(ev)
             # Filters run before the alert on purpose: if a rule has already moved
             # the chat to the archive or marked it read, there is no reason to wake
             # the owner for that same message — it is handled. The alert can be
@@ -848,6 +856,86 @@ class Daemon:
                 log("digest loop error:\n" + traceback.format_exc())
             await asyncio.sleep(DIGEST_TICK_SEC)
 
+    # ---------- chat dossiers: automatic refresh ----------
+
+    def note_for_memory(self, ev: dict) -> None:
+        """Count the message towards the chat's counter. The tick decides whether
+        it is time to refresh.
+
+        Own outgoing messages count too: an arrangement is spelled out by the owner
+        as often as by the other side, and the dossier describes the whole
+        conversation.
+        """
+        if not self.rules.get("memory_auto"):
+            return
+        key = (ev.get("account") or config.MAIN_ACCOUNT, ev["chat_id"])
+        row = self.memory_pending.setdefault(key, {"count": 0, "name": ev.get("chat") or ""})
+        row["count"] += 1
+        if ev.get("chat"):
+            row["name"] = ev["chat"]
+
+    def _memory_wanted(self, chat_id: int, name: str, svc: TelegramService) -> bool:
+        """Dossiers are kept either by an explicit list or for chats that already
+        have one.
+
+        No chat gets a dossier on its own: it costs money and sends pieces of the
+        conversation outwards — that is started on a direct request from the owner.
+        """
+        listed = self.rules.get("memory_chats") or []
+        if listed:
+            return self._chat_matches(listed, chat_id, name)
+        return svc._memory_store().exists(chat_id)
+
+    async def check_memory(self) -> None:
+        if not self.rules.get("memory_auto") or not self.memory_pending:
+            return
+        after = max(1, int(self.rules.get("memory_after") or 50))
+        cap = max(1, int(self.rules.get("memory_max_per_hour") or 10))
+        now = time.time()
+        self.memory_done = [t for t in self.memory_done if now - t < 3600]
+
+        for (account, chat_id), row in sorted(
+            self.memory_pending.items(), key=lambda kv: -kv[1]["count"]
+        ):
+            if row["count"] < after:
+                continue
+            if len(self.memory_done) >= cap:
+                log(f"memory: cap of {cap} updates per hour is used up, waiting")
+                return
+            svc = self.services.get(account)
+            self.memory_pending.pop((account, chat_id), None)
+            if svc is None or not self._memory_wanted(chat_id, row.get("name") or "", svc):
+                continue
+            params = {"chat": chat_id, "action": "update"}
+            try:
+                res = await svc.memory(chat=chat_id, action="update")
+                self.memory_done.append(time.time())
+                self.append_action("memory", params, res, None, account=account, auto="memory_auto")
+                log(f"memory: {res.get('chat')} updated, "
+                    f"{res.get('new_messages')} new messages")
+            except Exception as exc:
+                self.append_action(
+                    "memory", params, None, f"{type(exc).__name__}: {exc}",
+                    account=account, auto="memory_auto",
+                )
+                log(f"memory: failed to update {chat_id}: {type(exc).__name__}: {exc}")
+
+    async def memory_loop(self) -> None:
+        """A separate tick, because an update is a network call to the model.
+
+        Doing it right inside the incoming-message handler is not allowed: the
+        watcher must stay fast, otherwise it starts falling behind the stream of
+        messages.
+        """
+        while True:
+            try:
+                await self.check_memory()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log("memory loop error:\n" + traceback.format_exc())
+            await asyncio.sleep(MEMORY_TICK_SEC)
+
     # ---------- asking the owner ----------
 
     async def ask(
@@ -1111,26 +1199,26 @@ class Daemon:
             log("reaction watcher error:\n" + traceback.format_exc())
 
     async def on_own_message(self, event, account: str = config.MAIN_ACCOUNT) -> None:
-        """Our own sent message: only for tg_wait(include_own=true)."""
-        if not self.waiters:
+        """Our own sent message: for tg_wait(include_own=true) and the dossier counter."""
+        if not self.waiters and not self.rules.get("memory_auto"):
             return
         try:
             msg = event.message
             chat = await event.get_chat()
-            self.feed_waiters(
-                {
-                    "at": datetime.now(timezone.utc).isoformat(),
-                    "account": account,
-                    "chat": entity_name(chat),
-                    "chat_id": utils.get_peer_id(chat),
-                    "private": bool(event.is_private),
-                    "from": "you",
-                    "message_id": msg.id,
-                    "text": (msg.message or "")[:1000],
-                    "media": bool(msg.media),
-                    "out": True,
-                }
-            )
+            ev = {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "account": account,
+                "chat": entity_name(chat),
+                "chat_id": utils.get_peer_id(chat),
+                "private": bool(event.is_private),
+                "from": "you",
+                "message_id": msg.id,
+                "text": (msg.message or "")[:1000],
+                "media": bool(msg.media),
+                "out": True,
+            }
+            self.feed_waiters(ev)
+            self.note_for_memory(ev)
         except Exception:
             log("own-message waiter error:\n" + traceback.format_exc())
 
@@ -1433,6 +1521,7 @@ class Daemon:
             "scheduled": t.scheduled,
             "export": t.export,
             "index": t.index,
+            "memory": t.memory,
             "activity": t.activity,
             "click": t.click,
             "send": t.send,
@@ -1551,6 +1640,7 @@ class Daemon:
         bot_task = asyncio.create_task(self.bot_loop())
         reminder_task = asyncio.create_task(self.reminder_loop())
         digest_task = asyncio.create_task(self.digest_loop())
+        memory_task = asyncio.create_task(self.memory_loop())
         if self.bot.configured:
             try:
                 await self.bot.send("The agent is connected to Telegram. /help — what I can do.")
@@ -1569,6 +1659,7 @@ class Daemon:
             bot_task.cancel()
             reminder_task.cancel()
             digest_task.cancel()
+            memory_task.cancel()
             await self.bot.close()
             await runner.cleanup()
             for svc in self.services.values():
@@ -1596,7 +1687,7 @@ WRITE_METHODS = {
 # bit in the account itself and shows nothing to anyone — there is nothing to ask
 # permission for. But it puts the conversation on disk in a parseable form, and
 # `drop` sweeps it back off, and the owner must see both events in `actions.jsonl`.
-AUDIT_ONLY = {"index"}
+AUDIT_ONLY = {"index", "memory"}
 
 # ---------- write confirmation mode ----------
 

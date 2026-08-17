@@ -119,6 +119,23 @@ must not be able to lift a restriction off itself. An edit to the file takes
 effect immediately, there is no need to restart the daemon — the mode's settings
 are re-read from disk on every writing call.
 
+## Chat dossiers
+
+| Variable | What |
+|---|---|
+| `OPENAI_API_KEY` | the key the dossiers are written with; without it `tg_memory(action="update")` refuses to work |
+| `TG_MEMORY_MODEL` | the model, `gpt-4o-mini` by default |
+| `TG_MEMORY_BASE_URL` | the API address, `https://api.openai.com/v1` by default; any compatible service goes here too |
+| `TG_MEMORY_FIRST` | how many messages to take on the first pass, 300 |
+| `TG_MEMORY_MAX_NEW` | cap on new messages per update, 400 |
+| `TG_MEMORY_MAX_CHARS` | how many characters to ask the model for, 3000 |
+| `TG_MEMORY_TIMEOUT` | how long to wait for the model's answer, 90 s |
+
+`TG_MEMORY_BASE_URL` exists so that the correspondence is not obliged to go to
+OpenAI: any API-compatible service or a local server is substituted with a single
+line. This is the only place in the agent where the content of chats leaves the
+machine — see [security.md](security.md).
+
 ## Audio transcription
 
 | Variable | What |
@@ -234,6 +251,10 @@ In docker this is not needed: there the role of autostart is played by `restart:
 | `quiet_hours` | `[23, 8]` — stay silent from 23:00 to 08:00; `null` — round the clock |
 | `digest_at` | digest times, `["09:00", "20:00"]`; an empty list means off. See [digest](#scheduled-digest) |
 | `auto` | inbox filters: condition → action. See [filters](#inbox-filters) |
+| `memory_auto` | update chat dossiers on their own, as the correspondence goes. Off by default: this is money and sending pieces of the correspondence outside |
+| `memory_after` | after how many new messages in a chat to update the dossier, 50 by default |
+| `memory_chats` | which chats to keep dossiers for; an empty list means only those where a dossier was already created by hand |
+| `memory_max_per_hour` | cap on auto-updates per hour, 10 by default. This is the agent's only way to spend money, and it is capped |
 
 The order of the checks is this: pause and `enabled` → your own outgoing → your
 own bot → `ignore_bots` → `mute_chats` → quiet hours → `keywords` →

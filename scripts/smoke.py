@@ -83,6 +83,8 @@ async def main() -> int:
             ("actions", {"since": "today", "limit": 5}, "for today"),
             ("remind", {"list": True}, "list"),
             ("index", {"action": "status"}, "status"),
+            # read only: update costs money and sends the correspondence outside
+            ("memory", {"action": "list"}, "list"),
             ("saved_tags", {}),
             ("stories", {}),
             ("sessions", {}),

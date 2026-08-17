@@ -20,7 +20,7 @@ from telethon import TelegramClient, functions, types, utils
 from telethon.errors import FloodWaitError
 from telethon.helpers import add_surrogate, del_surrogate
 
-from . import config
+from . import config, memory as memory_mod
 from .index import MessageIndex
 
 
@@ -128,6 +128,8 @@ MEDIA_FILTERS = {
 # says plainly that it did not read everything: sync is incremental, the next
 # call continues from the same boundary. A batch of 300 messages is the size of
 # one sqlite commit: a sync interrupted midway does not lose what already landed.
+MEMORY_ACTIONS = ("show", "update", "list", "drop")
+
 INDEX_BUDGET_SEC = 100.0
 INDEX_DEFAULT_LIMIT = 2000
 INDEX_MAX_LIMIT = 20000
@@ -2547,6 +2549,124 @@ class TelegramService:
                 "boundary."
             )
         return out
+
+    # ---------- chat dossiers ----------
+
+    def _memory_store(self) -> memory_mod.MemoryStore:
+        return memory_mod.MemoryStore(config.memory_dir(self.account))
+
+    async def memory(
+        self,
+        chat: Any = None,
+        action: str = "show",
+        limit: int | None = None,
+        model: str | None = None,
+    ) -> dict:
+        """A dossier on a chat: `show`, `update`, `list`, `drop`.
+
+        An update grows the previous text rather than retelling the history from
+        scratch: into the model goes the old dossier plus only those messages
+        that are not in it yet. That is why the second update costs pennies,
+        while the dossier remembers even what left the history horizon long ago.
+        """
+        action = (action or "show").strip().lower()
+        if action not in MEMORY_ACTIONS:
+            raise ValueError(f"action: {', '.join(MEMORY_ACTIONS)}")
+        store = self._memory_store()
+
+        if action == "list" or (action == "show" and chat is None):
+            rows = store.listing()
+            return {"account": self.account, "chats": len(rows), "items": rows,
+                    "dir": str(store.root)}
+
+        if chat is None:
+            raise ValueError(f"action {action} needs a chat")
+        chat_id, name, kind, ent = await self._index_target(chat)
+
+        if action == "drop":
+            return store.drop(chat_id) | {"account": self.account, "chat": name}
+
+        found = store.read(chat_id)
+        if action == "show":
+            if not found:
+                raise ValueError(
+                    f"there is no dossier on \"{name}\" yet — start one: "
+                    f'memory(chat="{name}", action="update")'
+                )
+            meta, body = found
+            return {"account": self.account, "chat": name, "chat_id": chat_id,
+                    "meta": meta, "memory": body}
+
+        # ---- update ----
+        key = config.openai_key()
+        if not key:
+            raise RuntimeError(
+                "OPENAI_API_KEY is not set in .env — there is nothing to keep the "
+                "dossier with"
+            )
+        settings = config.memory_settings()
+        meta, previous = found if found else ({}, "")
+        covered_to = int(meta.get("covered_to") or 0)
+        cap = int(limit or (settings["max_new_messages"] if covered_to
+                            else settings["first_messages"]))
+        cap = max(10, min(cap, 2000))
+
+        rows: list[dict] = []
+        kwargs: dict[str, Any] = {"limit": cap}
+        if covered_to:
+            kwargs["min_id"] = covered_to
+        async for msg in self.client.iter_messages(ent, **kwargs):
+            rows.append(self.message_dict(msg))
+        rows.reverse()                       # the model reads from old to new
+        if not rows:
+            return {"account": self.account, "chat": name, "chat_id": chat_id,
+                    "updated": False,
+                    "reason": f"no new messages since last time (id {covered_to})"}
+
+        fresh = memory_mod.format_messages(rows)
+        if not fresh.strip():
+            return {"account": self.account, "chat": name, "chat_id": chat_id,
+                    "updated": False,
+                    "reason": "the new messages carry no text — there is nothing "
+                              "to write a dossier from"}
+
+        prompt = memory_mod.build_messages(
+            {"id": chat_id, "name": name, "type": kind},
+            previous or None,
+            fresh,
+            settings["max_chars"],
+        )
+        body, usage = await memory_mod.complete(
+            key,
+            model or settings["model"],
+            prompt,
+            base_url=settings["base_url"],
+            timeout_sec=settings["timeout_sec"],
+        )
+        new_meta = {
+            "chat": name,
+            "chat_id": chat_id,
+            "type": kind,
+            "account": self.account,
+            "updated": memory_mod._now(),
+            "covered_to": max(r["id"] for r in rows),
+            "messages_seen": int(meta.get("messages_seen") or 0) + len(rows),
+            "model": usage.get("model"),
+        }
+        path = store.write(chat_id, new_meta, body)
+        return {
+            "account": self.account,
+            "chat": name,
+            "chat_id": chat_id,
+            "updated": True,
+            "first_time": not found,
+            "new_messages": len(rows),
+            "covered_to": new_meta["covered_to"],
+            "chars": len(body),
+            "usage": usage,
+            "file": str(path),
+            "memory": body,
+        }
 
     # ---------- looking at media and listening to it ----------
 

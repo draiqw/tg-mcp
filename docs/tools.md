@@ -1,6 +1,6 @@
 # MCP tools
 
-76 tools. Each one is a thin wrapper over a core method; all the logic is in
+77 tools. Each one is a thin wrapper over a core method; all the logic is in
 `tgagent/core.py`.
 
 ## Accounts
@@ -438,6 +438,57 @@ away in another language. Up to 10 messages per call, each summarised separately
 
 Checked on a post of 3051 characters: a four-paragraph summary came back, and the
 same one in English with `to_lang="en"`.
+
+## Chat memory
+
+### `tg_memory(chat=None, action="show", limit=None, model=None)`
+
+A dossier on a chat: who these people are, what the conversation is about, what
+has already been agreed. One markdown file per chat in
+`data/memory/<chat id>.md`, written by a language model.
+
+The file name is the chat id, not the title: a chat gets renamed, and the dossier
+must neither get lost nor split in two. The title lies inside, in the
+frontmatter, together with the `covered_to` boundary — the id of the last message
+taken into account.
+
+| action | What it does |
+|---|---|
+| `show` | read the dossier; without `chat` — a list of all that exist |
+| `update` | update it, and create it if it does not exist yet |
+| `list` | every dossier with its metadata |
+| `drop` | delete this chat's dossier |
+
+**An update builds on top, it does not retell from scratch.** What goes to the
+model is the previous dossier plus only the messages that are not in it yet. So
+the first pass costs the history and every one after that costs pennies, and the
+dossier remembers what went over the horizon long ago. Measured on a live chat:
+the first pass 6142 input tokens, the next one 747.
+
+The sections are fixed: "What this chat is", "Who takes part", "What it is
+usually about", "Agreements and facts", "Open questions". The dossier is read not
+by a human but by the agent, right before it answers, and it needs a predictable
+shape.
+
+Two warnings, both material:
+
+- **An update sends pieces of the correspondence outside** — to OpenAI by default
+  (`OPENAI_API_KEY`, `TG_MEMORY_MODEL`, `gpt-4o-mini` by default). This is the
+  only place in the whole agent where personal correspondence leaves the machine.
+  By itself a dossier is not created for any chat.
+- **The dossier is written from untrusted text.** Anything at all can be inside a
+  correspondence, instructions to a model included. The prompt says outright that
+  the content of the chat is data and not instructions, but the finished dossier
+  deserves the same attitude: it is a retelling of someone else's words, not a
+  command to the agent.
+
+Auto-update is configured by the rules `memory_auto`, `memory_after`,
+`memory_chats`, `memory_max_per_hour` — see
+[configuration.md](configuration.md#alert-rules). The daemon does the counting:
+it sees the stream of messages anyway, so it knows which chat has accumulated
+enough new material. The update runs on a separate tick rather than in the
+incoming-message handler — otherwise the watcher would start falling behind the
+stream for the length of the network call to the model.
 
 ## Waiting and questions
 
@@ -897,7 +948,7 @@ limits.
 
 ## What is deliberately missing
 
-The MTProto map (layer 227) is wider than these 76 tools, and part of it is
+The MTProto map (layer 227) is wider than these 77 tools, and part of it is
 deliberately not taken — that is a decision, not a gap:
 
 | What | Why not |

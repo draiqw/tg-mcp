@@ -193,6 +193,46 @@ both the text and the housekeeping pages leave the disk. A per-chat wipe does a
 readable in the file's freed pages. Verified with `grep -a` over the binary:
 after a `drop` no words from the wiped chat remain in the file.
 
+## Chat dossiers: the only way correspondence leaves the machine
+
+`tg_memory` is the first and so far the only place in the agent where chat
+contents leave the machine. Updating a dossier sends messages to a language
+model: by default to OpenAI (`OPENAI_API_KEY`, `gpt-4o-mini`), but
+`TG_MEMORY_BASE_URL` switches it to any API-compatible service, a local one
+included.
+
+Everything else in the agent has stayed inside until now: MTProto goes straight
+to Telegram, the index lies on disk, a transcript made by the built-in engine is
+computed on Telegram's own servers. The only comparable exception is the `groq`
+engine in `tg_transcribe`, and that one is also enabled explicitly only.
+
+What follows from this by design:
+
+- **No dossier is created for any chat by itself.** `memory_auto` is off,
+  `memory_chats` is empty, and with an empty list the auto-update touches only
+  those chats where a dossier has already been created by the owner's hand. The
+  agent cannot create dossiers for the whole account "just in case".
+- **The hourly cap** (`memory_max_per_hour`, 10 by default) limits both the cost
+  and the volume of what goes outside. This is the agent's only opportunity to
+  spend the owner's money, and it is bounded from above.
+- **An update extends rather than retells from scratch.** The previous dossier
+  plus only the new messages go to the model — that is, each piece of the
+  correspondence is sent outside once, not on every update.
+- The dossier files lie in `data/memory/` with permissions 600, the directory
+  with 700, and fall under the same `.gitignore` as everything else in `data/`.
+- Every update and wipe is written to `actions.jsonl` (`AUDIT_ONLY`); automatic
+  ones carry the mark `auto: memory_auto`.
+
+To wipe: `uv run tg call memory '{"chat":"Huts","action":"drop"}'`.
+
+Separately about injections: a dossier is written **from untrusted text**. The
+model's prompt says outright that the contents of the correspondence are data,
+not instructions, and that instructions found inside must not be carried out.
+But the finished dossier then goes into the agent's context, so it should be
+treated as a retelling of someone else's words, not as your own memory. This is
+also written in the description of the tool itself — where the model will read
+it.
+
 ## Injections through chat contents
 
 Message texts are untrusted data. They are never interpreted by code. At the

@@ -27,6 +27,7 @@ REMINDERS_FILE = DATA / "reminders.json"
 DIGEST_FILE = DATA / "digest.json"
 DOWNLOADS = DATA / "downloads"
 INDEX_DB = DATA / "index.db"     # local search index, see tgagent/index.py
+MEMORY_DIR = DATA / "memory"     # chat dossiers, one markdown file per chat
 
 DEFAULT_RULES = {
     "enabled": True,
@@ -52,6 +53,12 @@ DEFAULT_RULES = {
     "confirm_writes": "off",        # off | outgoing | all
     "confirm_whitelist": ["me"],    # chats not to ask about
     "confirm_timeout_sec": 90,      # how long to wait for an answer; silence = refusal
+    # Chat dossiers. Updating them costs money and sends chunks of the
+    # conversation outside, so it is off by default and works only by list.
+    "memory_auto": False,           # update dossiers on their own, as the conversation goes
+    "memory_after": 50,             # after how many new messages in a chat
+    "memory_chats": [],             # for which chats; empty — for every chat that already has one
+    "memory_max_per_hour": 10,      # cap on auto-updates per hour: this is money
 }
 
 # Keys of the confirmation mode. They live in the same file as the alert rules, but
@@ -176,6 +183,34 @@ def index_path(account: str | None = None) -> Path:
     """
     label = normalize_account(account)
     return INDEX_DB if label == MAIN_ACCOUNT else DATA / f"index-{label}.db"
+
+
+def memory_dir(account: str | None = None) -> Path:
+    """Chat dossiers: main → data/memory, work → data/memory-work.
+
+    One directory per account — for the same reason as with the index: the same
+    person in two accounts is two different conversations with different histories.
+    """
+    label = normalize_account(account)
+    return MEMORY_DIR if label == MAIN_ACCOUNT else DATA / f"memory-{label}"
+
+
+def openai_key() -> str | None:
+    return env("OPENAI_API_KEY")
+
+
+def memory_settings() -> dict:
+    """With what and how the chat dossiers are kept."""
+    return {
+        "model": env("TG_MEMORY_MODEL", "gpt-4o-mini"),
+        "base_url": env("TG_MEMORY_BASE_URL", "https://api.openai.com/v1"),
+        # How many messages go into the model: deeper on the first pass, after that
+        # only what has arrived since the last time.
+        "first_messages": int(env("TG_MEMORY_FIRST", "300") or 300),
+        "max_new_messages": int(env("TG_MEMORY_MAX_NEW", "400") or 400),
+        "max_chars": int(env("TG_MEMORY_MAX_CHARS", "3000") or 3000),
+        "timeout_sec": int(env("TG_MEMORY_TIMEOUT", "90") or 90),
+    }
 
 
 def list_accounts() -> list[str]:

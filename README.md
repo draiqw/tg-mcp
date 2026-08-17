@@ -44,7 +44,7 @@ MCP client (Claude Code, Claude Desktop, any other)
         │  stdio
         ▼
 tgagent.mcp_server ──unix socket──▶ tgagent.daemon ──MTProto──▶ Telegram
-     76 tools         /data/daemon.sock      │
+     77 tools         /data/daemon.sock      │
                                              ├─ watcher: incoming → filters → alert
                                              ├─ digest on a schedule
                                              ├─ reminders and waiting
@@ -100,7 +100,7 @@ The details, including why MCP is started inside the container and not on the ho
 | File | What it covers |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | the core, the layers, the invariants, the flow of data, what lives where |
-| [docs/tools.md](docs/tools.md) | a reference for all 76 MCP tools with their parameters |
+| [docs/tools.md](docs/tools.md) | a reference for all 77 MCP tools with their parameters |
 | [docs/configuration.md](docs/configuration.md) | environment variables, the three write modes, alert rules, the digest, inbox filters, limits |
 | [docs/mcp.md](docs/mcp.md) | connecting as an MCP server, the subagents, diagnostics |
 | [docs/docker.md](docs/docker.md) | build, sign-in inside the container, updating, backup |
