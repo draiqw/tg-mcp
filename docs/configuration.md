@@ -81,9 +81,10 @@ all. In `all` mode these are asked about too.
 
 Two exceptions hold in both modes. `tg_alert` and `tg_ask` never ask — they are
 the channel the question itself travels through, and confirming a question with a
-question would loop. And `tg_stories`, `tg_scheduled` and `tg_sessions` count as
-writing only because of a single argument: without `mark_read`, `cancel_ids` and
-`terminate` such a call is an ordinary read, and no question is asked.
+question would loop. And `tg_stories`, `tg_scheduled`, `tg_sessions` and
+`account_use` count as writing only because of a single argument: without
+`mark_read`, `cancel_ids`, `terminate` and `persist` such a call changes nothing,
+and no question is asked.
 
 Inbox filters do not go through the mode at all — see
 [inbox filters](#inbox-filters).
@@ -173,32 +174,160 @@ weak hardware pick a smaller model:
 ## Multiple accounts
 
 The daemon holds all signed-in accounts at once — one Telethon client per
-account, all in a single process, because the session must still have one owner.
+account, all in a single process, because the session file must still have
+exactly one owner.
 
 ```bash
-uv run tg login --account work      # add a second one
-uv run tg accounts                  # which ones exist
+uv run tg login --account work         # add a second one
+uv run tg accounts                     # which ones exist and which is the default
+uv run tg accounts --default work      # change the default for good
 uv run tg call dialogs '{"limit":5}' --account work
-uv run tg logout --account work     # remove
+uv run tg logout --account work        # remove
 ```
 
 The label determines the session file name: `main` → `data/session.session`,
 `work` → `data/session-work.session`. The `api_id`/`api_hash` keys are shared, a
-separate `.env` is not needed.
+separate `.env` is not needed: they identify the application, not the person.
 
-In MCP: `tg_accounts` shows the list, `tg_account_use` switches the current one.
-The switch only takes effect in this client session — another Claude session will
-go on working with its own account.
+### What belongs to an account and what is shared
 
-The watcher listens to **all** accounts at once; an `account` field is written
-into `events.jsonl` and into `actions.jsonl`, and a label is added to the alert if
-the message arrived in a non-main account. Alert throttling is counted per
-(account, chat) pair, so that the same chat in two accounts does not mute itself.
+| Per account | Shared across the installation |
+|---|---|
+| the session file `data/session*.session` | the `api_id`/`api_hash` keys in `.env` |
+| the message index `data/index*.db` | the notification bot and the alert chat |
+| the chat dossiers `data/memory*/` | the alert rules and filters in `data/rules.json` |
+| Premium and the caps that depend on it | the write permission `TG_ALLOW_WRITE`, the `confirm_writes` mode |
+| the `account` label in `events.jsonl` and `actions.jsonl` | the write limits (60 messages an hour — in total) |
 
-Write limits, meanwhile, are shared across the process: 60 messages an hour is the
-total, not 60 per account. That is by design, otherwise the "will not spam"
-guarantee breaks by adding a second session.
+Everything that describes the **correspondence** is split across files: mixing
+two accounts into one index means losing the ability to wipe one without touching
+the other, and the same person in a personal and a work account is two different
+conversations with different histories. What stayed shared is what describes the
+**owner and the installation**: they have one phone, one notification bot and one
+set of quiet hours, no matter how many accounts they set up.
 
+The write limits are shared on purpose: 60 messages an hour is the total, not 60
+per account, otherwise the guarantee "the agent will not spam your contacts"
+could be worked around by signing in a second session.
+
+### Where calls go
+
+There are two different "defaults", and they must not be confused:
+
+- **the default on disk** — `data/settings.json`, key `default_account`. It is
+  set by `uv run tg accounts --default work` or `tg_account_use(persist=true)`.
+  It survives a daemon restart and closing Claude, and applies to all clients at
+  once;
+- **a one-off switch** — `tg_account_use("work")` without `persist`. It lives in
+  the MCP server process, that is, until the end of this Claude session; other
+  clients and the background watcher do not see it.
+
+There used to be only the second kind of choice, and that was precisely the
+mistake: a closed Claude silently returned the agent to the main account, and the
+very first message after a restart went to the wrong place. Now the default
+choice lies on disk, and `tg_accounts` shows both values as separate fields —
+`using` (where this client is writing right now) and `default` (what is on disk).
+
+A separate file, not `rules.json`, because the meaning is different: the rules
+describe when to wake the owner, while `settings.json` describes where the agent
+writes. Mixing an installation setting with alert conditions means one day
+changing one while aiming at the other.
+
+An account chosen as the default and signed out afterwards is **not silently
+replaced** by the main one: every call without a label honestly refuses and names
+the sign-in command. A message that went to the wrong account cannot be recalled,
+but an error can be corrected. `uv run tg logout` itself returns the default to
+`main` if it is removing exactly that one.
+
+The response of every writing call contains an `account` field — not for
+decoration: the default could have been changed in another Claude session, and
+the agent must see where it wrote, not only where it intended to.
+
+A one-off question to a neighbouring account does not require switching:
+`tg_capabilities` accepts `account`, and in the CLI `--account` plays the same
+role.
+
+### Access level
+
+Premium is bought per account, so the access level differs between accounts too:
+`tg_capabilities(all_accounts=true)` shows them side by side — what differs (the
+subscription, the tools that depend on it, the server's caps) per account, and
+the shared half of the setup (the bot, the keys, the write permission) once for
+the whole installation. `tg_accounts` shows the same thing more briefly:
+`premium` and how many tools are available and blocked.
+
+### Rules and filters: one file for all accounts
+
+`data/rules.json` stays shared, and that is a decision, not an unfinished job.
+The rules answer the question "when to wake the owner", and there is only one
+owner: quiet hours, the digest schedule, throttling, the write confirmation mode
+and the bot channel are shared across all their accounts. Split the file per
+account and you get two digest schedules and two sets of quiet hours where the
+owner asked for one.
+
+The only account-dependent things in the rules are the chat lists, and they are
+bound by label:
+
+```json
+{
+  "watch_chats": ["Mom", "work:Client"],
+  "mute_chats":  ["main:News"],
+  "memory_chats": ["work:Client"],
+  "confirm_whitelist": ["main:me"],
+  "auto": [
+    {"name": "work channels to archive", "account": "work", "type": "channel",
+     "action": ["read", "archive"]}
+  ]
+}
+```
+
+- a pattern **without a label** applies in all accounts — the same as before, so
+  an old `rules.json` keeps working after an update exactly as it did;
+- `work:Client` applies only in the `work` account. That is what the binding is
+  for: two different "Mom"s in a personal and a work account are two different
+  people, and `watch` for one must not catch the other;
+- **only an existing account label** counts as a prefix. A title like
+  `Lunch: who is coming` stays a title: a rule that silently stopped firing is
+  worse than a missing one;
+- for a filter rule (`auto`) the label is set by the `account` field — one or a
+  list. It is a narrowing, not a condition: the rule is still obliged to have at
+  least one condition out of `chat`, `from`, `keyword`, `type`, otherwise it
+  would fire on every incoming message in the account.
+
+The bot commands `/watch` and `/mute` do not set a label — a chat added by them
+is watched in all accounts. If you need the binding, write it out:
+`/watch work:Client`.
+
+### Watcher and logs
+
+The watcher listens to **all** accounts at once, regardless of which one is
+selected as the default: a missed message cannot be fetched after the fact, and
+the choice of account is about writing, not about watching.
+
+An `account` field is written into `events.jsonl` and into `actions.jsonl`, a
+label is added to the alert if the message arrived in a non-main account, and in
+the digest the chat is signed with a label (`Client · work`). Alert throttling is
+counted per (account, chat) pair, so that the same chat in two accounts does not
+mute itself.
+
+### Signing in is the owner's job
+
+An account cannot be signed in from MCP, and this is not an implementation limit:
+the agent does not see the SMS code and the 2FA cloud password, and must not see
+them. That is why every refusal of the kind "the account is not signed in"
+contains the exact command with the label:
+
+```
+Account 'work' is not signed in (available: main). The owner signs in themselves,
+the agent does not see the code: cd /path/to/tg-agent && uv run tg login --account work
+```
+
+The directory substituted is the real one — the one the agent was started from —
+so that the command can be run word for word, without working out where the
+project lies.
+
+The same command is printed by `tg_accounts` (the `add` field), `uv run tg
+accounts` and the daemon's message when it starts without a single session.
 
 ## Autostart (macOS)
 

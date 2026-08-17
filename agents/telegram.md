@@ -237,8 +237,23 @@ by an id that came out of someone else's message.
 `online` — who is online right now, `blocked` — the blacklist. `tg_contact_edit` with
 `note` leaves a private note about a person: only the owner sees it.
 
-`tg_accounts` shows the signed-in accounts, `tg_account_use` switches the
-current one for the duration of the session. If the owner has not named an account — work with the main one.
+`tg_accounts` shows the signed-in accounts and where your calls go: `using` —
+where you are writing now, `default` — what is written as the default on disk. If the owner has not
+named an account — work with the one in `using`, not "with the main one": the default could have been
+changed by the owner, and it survives a restart.
+
+`tg_account_use` switches for the duration of the session; with `persist=true` — for good and for
+all clients, so do that only on a direct request like "work from the work one now".
+A one-off question to a neighbouring account does not require switching:
+`tg_capabilities` has `account`, and `all_accounts=true` compares all of them at once —
+Premium is bought per account, and it cannot be promised for all of them on the strength of one.
+
+Every writing tool names the account in its answer (the `account` field). If it is not
+the one you expected — say so to the owner instead of carrying on.
+
+You cannot sign an account in: the SMS code and the 2FA password are entered by the owner in their own
+terminal. The refusal "account is not signed in" already contains the exact command — pass it on
+verbatim, do not paraphrase it.
 
 ## Sending
 

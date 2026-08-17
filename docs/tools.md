@@ -5,14 +5,39 @@
 
 ## Accounts
 
-### `tg_accounts()`
-Which accounts the daemon holds and which one your calls go to. There can be
-several accounts: `uv run tg login --account work` sets up a second one.
+### `tg_accounts(access=True)`
+Which accounts the daemon holds and which one your calls go to. Every row: the
+label, who is behind it (name, id, `@username`, the last digits of the phone),
+whether there is Premium, whether the account is active for this client right
+now, whether it is the one recorded as the default, and the files that belong to
+it alone — session, index, dossiers.
 
-### `tg_account_use(account)`
-Send all further calls to this account (`main` is the primary one). The switch
-lives only in the current client session: other clients are untouched, and the
-background watcher listens to all accounts at once either way.
+Two "defaults" are named by different fields and must not be confused: `using` is
+where this client's calls go now, `default` is what is written on disk and
+survives a restart. They diverge only after a one-off `tg_account_use`.
+
+`access=True` (the default) adds each account's access level: Premium and the
+"available/blocked" counters. That is one request to Telegram per account, and
+the answer is cached for ten minutes; `access=false` returns the list alone.
+
+The `add` field holds a ready-made command for a second account — the agent
+cannot sign it in, the owner types the code and the password.
+
+### `tg_account_use(account, persist=False)`
+Send further calls to this account (`main` is the primary one).
+
+Without `persist` the switch lives only in the current client session: other
+clients are untouched, and after Claude restarts everything goes back to the
+default. With `persist=true` the choice is written to `data/settings.json` and
+becomes the account every client starts from and the one that survives a daemon
+restart — that is for "work from the work account from now on", not for a single
+errand.
+
+The background watcher listens to all accounts at once either way.
+
+A one-off question to a neighbouring account needs no switch: `tg_capabilities`
+has an `account` parameter. Which account you are writing from is visible in
+`tg_accounts`, and every writing tool names the account in its own answer.
 
 ## How a chat is specified
 
@@ -103,7 +128,7 @@ allowed, whether the bot is configured, which transcription keys exist, that is
 `tg_status`. The assembled answer to "what is available to me and why not" is
 `tg_capabilities`.
 
-### `tg_capabilities(chat=None)`
+### `tg_capabilities(chat=None, account=None, all_accounts=False)`
 
 What is available to the agent, what is not, and what has to be done for it to
 become available. It answers two readers at once: the owner after signing in —
@@ -153,9 +178,60 @@ about a particular chat, which is why without `chat` no such request is made: th
 account level does not depend on the chat, and paying for it with an extra call
 to Telegram is pointless.
 
+`account` asks about a neighbouring account without switching into it: a one-off
+question should not require `tg_account_use` there and back.
+
+`all_accounts=true` compares every signed-in account at once. This is needed
+because Premium is bought per account: the promise "I will forward a
+two-gigabyte file" is true for exactly one of them. Per account it shows what
+differs between them (the subscription, the tools that depend on it, the server
+caps), while the shared half of the setup — the write permission, the
+notification bot, the keys in `.env`, the alert rules — appears once in the
+`shared` field: it belongs to the installation, not to a Telegram session.
+Rights in a chat are not analysed in this mode: they depend on the account, and
+one answer for all of them would be untrue.
+
 The same answer in human wording is printed by `uv run tg capabilities`, by the
 tail of `tg login` and by `tg setup`, and by the bot command `/can` (with an
 argument — about a particular chat).
+
+### A refusal instead of a raw Telegram error
+
+A restriction discovered in the middle of the work is the same restriction, and
+it has to be named the same way: by its reason and its way out, not by the name
+of an exception. From `ChatAdminRequiredError` the model will not work out what
+to do next; from "admin rights are required, ask the chat owner to grant them" it
+will. So the server's typical answers are translated in one place (the tables in
+`tgagent/capabilities.py`), and the translation itself happens on the way out of
+the daemon: every call passes through it, and a second place for this is not
+needed. That is how missing rights are explained, and a required subscription, a
+chat's ban on that reaction, a folder or pin limit hit, a caption that is too
+long, a file that does not fit into one upload, and waits (`FLOOD_WAIT`,
+slowmode) — with the number of seconds, because "wait" without a number is half
+an answer. The translation key is the Telegram code (`CHAT_ADMIN_REQUIRED`), not
+the Telethon class: the server adds codes faster than the library adds classes
+for them, and an unfamiliar error arrives as a string that contains the code
+anyway. An error with no explanation goes up as it was, together with the class
+name: an invented reason is worse than raw text.
+
+Some refusals are known before going to the network, and then the call does not
+go at all. The account properties this follows from — the Premium flag and the
+caps from `help.getAppConfig` — the daemon keeps in memory for ten minutes.
+Asking for them before every action would mean adding a request to every call;
+remembering them until restart is not allowed — the daemon runs for weeks, and a
+freshly bought subscription would be waiting for it to restart.
+
+The advance check refuses only where the answer is known in full, and that
+matters more than the check itself. Built-in transcription is rejected if there
+is no subscription **and** the account is not entitled to free transcriptions
+(`tg_limits`, the key `transcribe_audio_trial_weekly_number` equals zero): with a
+non-zero counter it works without Premium too, and forbidding it would be a lie.
+For `tg_react` without a subscription, a second reaction on a message and a
+custom emoji are rejected in advance — those are properties of the account, not
+of the chat, and knowing them does not require asking about the chat. If a
+property could not be established (no network, the configuration did not
+arrive), the call goes as before and gets Telegram's answer: "we are not sure, so
+we will not try" is the worst refusal of all.
 
 ## Reading
 
@@ -651,13 +727,18 @@ Three engines, `auto` tries them in order:
 
 | Engine | When it is taken | Upside | Limitations |
 |---|---|---|---|
-| `telegram` | voice messages and video notes | instant, free, nothing is downloaded | needs Premium; cannot do music or ordinary video; **clears the "not listened" flag** |
+| `telegram` | voice messages and video notes | instant, free, nothing is downloaded | needs Premium (without it — only within the free transcription counter); cannot do music or ordinary video; **clears the "not listened" flag** |
 | `groq` | everything else | fast, whisper-large-v3-turbo | needs `GROQ_API_KEY`, file up to 24 MB, paid past the limits |
 | `local` | if there is no key or no network | nothing leaves the machine | the first run downloads the model (~1.6 GB), needs `uv sync --extra local-whisper` |
 
 If an engine in the chain falls over, the answer still comes from the next one,
-and the `fallback_from` field shows what failed and why. `language="ru"` raises
-the accuracy a little.
+and the `fallback_from` field shows what failed and why — by reason, not by the
+name of an exception: engine errors are explained in words the same way the
+errors of the calls themselves are (see "A refusal instead of a raw Telegram
+error"). The `telegram` engine on an account without a subscription and without
+free transcriptions is cut off before the request — with `engine="auto"` the
+chain simply starts from the next one. `language="ru"` raises the accuracy a
+little.
 
 **Transcription by the `telegram` engine is visible to the sender.**
 `messages.TranscribeAudio` clears the `media_unread` flag on the server, that is,
@@ -827,7 +908,7 @@ with a question would be a loop.
 | `tg_schedule(chat, text, when, reply_to=None)` | send later: `+30m`, `+2h`, `2026-08-17T09:00` |
 | `tg_draft(chat, text=None, reply_to=None, clear=False)` | a draft instead of a send |
 | `tg_poll(chat, question, options, multiple=False, quiz_answer=None, anonymous=True)` | a poll or a quiz, 2–10 options |
-| `tg_react(chat, message_id, emoji=None, big=False)` | a reaction; without `emoji` — remove your own. `emoji` accepts a character, the id of a custom emoji (Premium) or a list of up to three. If the chat does not allow every reaction, the error lists the allowed ones |
+| `tg_react(chat, message_id, emoji=None, big=False)` | a reaction; without `emoji` — remove your own. `emoji` accepts a character, the id of a custom emoji (Premium) or a list of up to three (also Premium: without a subscription Telegram accepts one reaction, and both of these attempts are rejected before the chat is contacted). If the chat does not allow every reaction, the error lists the allowed ones |
 | `tg_click(chat, message_id, button=None)` | a bot's buttons: without `button` show them, with it press one |
 | `tg_edit(chat, message_id, text)` | edit something of yours already sent |
 | `tg_delete(chat, message_ids, revoke=True)` | deletion; `revoke` erases it for everyone, irreversibly |
@@ -1067,10 +1148,12 @@ uv run tg call index '{"action": "status"}'
 uv run tg call actions '{"since": "-6h"}'
 ```
 
-The method names match the tool names without the `tg_` prefix. There are two
-exceptions: `tg_resolve` calls the method `resolve_link`, and `tg_account_use`
-has no method at all — switching the account lives in the MCP server itself,
-while in the CLI the same role is played by the `--account` flag.
+The method names match the tool names without the `tg_` prefix. There is one
+exception: `tg_resolve` calls the method `resolve_link`. `tg_account_use` does
+have a method (`account_use`), but only a persistent choice reaches the daemon: a
+one-off switch lives in the MCP server itself, because the daemon serves every
+client at once and one client's choice must not change the behaviour of the rest.
 
-The account is chosen with it too:
-`uv run tg call dialogs '{"limit":5}' --account work`.
+The account for a one-off call is chosen with a flag:
+`uv run tg call dialogs '{"limit":5}' --account work`. A permanent one —
+`uv run tg accounts --default work`.

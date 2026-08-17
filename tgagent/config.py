@@ -23,6 +23,11 @@ ACTIONS_LOG = DATA / "actions.jsonl"
 DAEMON_LOG = DATA / "daemon.log"
 PID_FILE = DATA / "daemon.pid"
 RULES_FILE = DATA / "rules.json"
+# Settings of the installation itself, not of the alert rules: the default account
+# choice lands here. A separate file, because the meaning is different — rules.json
+# describes when to wake the owner, this is where the agent writes when nobody
+# switched it by hand.
+SETTINGS_FILE = DATA / "settings.json"
 REMINDERS_FILE = DATA / "reminders.json"
 DIGEST_FILE = DATA / "digest.json"
 DOWNLOADS = DATA / "downloads"
@@ -224,6 +229,37 @@ def list_accounts() -> list[str]:
     return found
 
 
+def login_command(account: str | None = None) -> str:
+    """The exact sign-in command for a label. One for the whole code base: the error
+    "account is not signed in" is useless if it says "sign in" instead of what to type."""
+    label = normalize_account(account)
+    tail = "" if label == MAIN_ACCOUNT else f" --account {label}"
+    return f"cd {ROOT} && uv run tg login{tail}"
+
+
+def add_account_command() -> str:
+    """The command for one more account — with a slot for the label.
+
+    Separate from `login_command`, because `<label>` cannot be passed through it:
+    normalization would strip the angle brackets out and substitute a name that
+    does not exist.
+    """
+    return f"{login_command()} --account <label>"
+
+
+def not_logged_in(account: str | None, known: list[str] | None = None) -> str:
+    """The text of the refusal "there is no such account". The code and the password
+    are typed by the owner in their own terminal, the agent never sees them and cannot
+    sign anyone in — so the whole point of the message is that the owner can run it
+    word for word."""
+    label = normalize_account(account)
+    have = ", ".join(known) if known else "none"
+    return (
+        f"Account {label!r} is not signed in (available: {have}). The owner signs in themselves, "
+        f"the agent never sees the code: {login_command(label)}"
+    )
+
+
 def ensure_dirs() -> None:
     DATA.mkdir(mode=0o700, exist_ok=True)
     DOWNLOADS.mkdir(mode=0o700, exist_ok=True)
@@ -322,6 +358,49 @@ def save_rules(rules: dict) -> dict:
     RULES_FILE.write_text(json.dumps(merged, ensure_ascii=False, indent=2))
     RULES_FILE.chmod(0o600)
     return merged
+
+
+def load_settings() -> dict:
+    """Installation settings from disk. A broken file means empty settings, not a
+    crash: one broken line must not stop the daemon from coming up."""
+    if SETTINGS_FILE.exists():
+        try:
+            data = json.loads(SETTINGS_FILE.read_text())
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}
+    return {}
+
+
+def save_settings(patch: dict) -> dict:
+    ensure_dirs()
+    merged = {**load_settings(), **patch}
+    SETTINGS_FILE.write_text(json.dumps(merged, ensure_ascii=False, indent=2))
+    SETTINGS_FILE.chmod(0o600)
+    return merged
+
+
+def default_account() -> str:
+    """The account label calls go to when the client has not been switched.
+
+    It lives on disk, not in the MCP server process: the choice "I am working from
+    the work account" survives closing Claude, otherwise the very first message
+    after a restart would go to the wrong place, and nobody would warn about it.
+    """
+    raw = load_settings().get("default_account")
+    if not raw:
+        return MAIN_ACCOUNT
+    try:
+        return normalize_account(str(raw))
+    except ValueError:
+        return MAIN_ACCOUNT
+
+
+def set_default_account(account: str | None) -> str:
+    """Remember the default for good. None or "main" returns to the main account."""
+    label = normalize_account(account)
+    save_settings({"default_account": label})
+    return label
 
 
 def write_env(values: dict[str, str]) -> None:

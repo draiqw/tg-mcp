@@ -312,6 +312,19 @@ def cmd_logout(args) -> int:
         for suffix in (".session", ".session-journal"):
             Path(str(base) + suffix).unlink(missing_ok=True)
         _p("Local session files deleted.")
+        # A default pointing at a deleted account is a refusal on every next
+        # call. We return it to the main one right here, instead of leaving the
+        # owner to deal with an error whose cause they have already forgotten.
+        label = config.normalize_account(getattr(args, "account", None))
+        if config.default_account() == label:
+            config.set_default_account(config.MAIN_ACCOUNT)
+            if label != config.MAIN_ACCOUNT:
+                _p("It was the default account — the default is back to main.")
+        # The index and the dossiers stay: they survive a re-login, and wiping
+        # them silently along with the session is not allowed — this is
+        # correspondence, not a service file.
+        _p(f"The index and dossiers of this account are untouched: {config.index_path(label)}, "
+           f"{config.memory_dir(label)}")
         return 0
 
     cmd_daemon_stop(args)
@@ -401,11 +414,27 @@ def _tail(path: Path, n: int) -> str:
 def cmd_accounts(args) -> int:
     found = config.list_accounts()
     if not found:
-        _p("Not a single account. Sign in: uv run tg login  (a second one: --account work)")
+        _p(f"Not a single account. Sign in: {config.login_command()}  "
+           "(a second one: --account work)")
         return 1
+
+    wanted = getattr(args, "default", None)
+    if wanted is not None:
+        label = config.normalize_account(wanted)
+        if label not in found:
+            _p(config.not_logged_in(label, found))
+            return 1
+        config.set_default_account(label)
+        _p(f"Default account: {label}. Holds across restarts too.")
+        if config.SOCKET.exists():
+            _p("The daemon already holds every account, no need to restart it.")
+
+    default = config.default_account()
     for label in found:
-        _p(f"{label:12} {config.session_path(label)}.session")
-    _p("\nAdd another: uv run tg login --account <label>")
+        mark = " ← default" if label == default else ""
+        _p(f"{label:12} {config.session_path(label)}.session{mark}")
+    _p(f"\nAdd another: {config.add_account_command()}")
+    _p("Change the default: uv run tg accounts --default <label>")
     return 0
 
 
@@ -413,6 +442,7 @@ def cmd_status(args) -> int:
     session_file = Path(str(config.session_path(getattr(args, "account", None))) + ".session")
     rows = [
         ("accounts", ", ".join(config.list_accounts()) or "none"),
+        ("default", config.default_account()),
         (
             ".env",
             "yes"
@@ -555,9 +585,12 @@ def main() -> None:
     with_account(sub.add_parser("status", help="state of the installation")).set_defaults(
         fn=cmd_status
     )
-    sub.add_parser("accounts", help="which accounts are signed in").set_defaults(
-        fn=cmd_accounts
+    acc = sub.add_parser("accounts", help="which accounts are signed in")
+    acc.add_argument(
+        "--default", default=None, metavar="LABEL",
+        help="remember this account as the default for all clients and restarts",
     )
+    acc.set_defaults(fn=cmd_accounts)
     with_account(
         sub.add_parser("capabilities", help="what is available and what is missing")
     ).set_defaults(fn=cmd_capabilities)

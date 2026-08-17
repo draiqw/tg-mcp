@@ -33,6 +33,10 @@ PROBE = "me"
 CASES: list[tuple] = [
     ("status", {}),
     ("accounts", {}),
+    # Without the access level the account list does not go to Telegram at all:
+    # that is a different code branch, and it can break silently on its own,
+    # separately from the full one.
+    ("accounts", {"access": False}, "no access"),
     ("structure", {}),
     ("folders", {}),
     ("dialogs", {"limit": 5}),
@@ -72,6 +76,10 @@ CASES: list[tuple] = [
     # With a chat one extra request appears that is absent otherwise — the rights
     # in that particular chat. Checked on Saved Messages: nobody asks for them there.
     ("capabilities", {"chat": PROBE}, "by chat"),
+    # A digest over all signed-in accounts at once: on a single account it must
+    # answer the same way as the plain one — otherwise the difference only shows
+    # up for someone who has two.
+    ("capabilities", {"all_accounts": True}, "all accounts"),
     ("contacts", {"kind": "top", "limit": 5}),
     ("contacts", {"kind": "birthdays", "limit": 5}),
     ("contacts", {"kind": "online", "limit": 5}),

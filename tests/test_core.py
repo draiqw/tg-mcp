@@ -10,7 +10,14 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from conftest import FakeClient, FakeDialog, FakeMessage, make_entity
+from conftest import (
+    FakeClient,
+    FakeConfigClient,
+    FakeDialog,
+    FakeMessage,
+    json_tree,
+    make_entity,
+)
 from telethon.tl import types
 
 from tgagent import config, core
@@ -382,35 +389,8 @@ def test_the_link_to_a_dm(user):
 # ---------------------------------------------------------------- account limits
 
 
-def _json(value):
-    """A Python value — into a tree of MTProto JSON types, as Telegram sends them."""
-    if isinstance(value, dict):
-        return types.JsonObject(
-            value=[types.JsonObjectValue(key=k, value=_json(v)) for k, v in value.items()]
-        )
-    if isinstance(value, list):
-        return types.JsonArray(value=[_json(v) for v in value])
-    if value is None:
-        return types.JsonNull()
-    if isinstance(value, bool):
-        return types.JsonBool(value=value)
-    if isinstance(value, (int, float)):
-        return types.JsonNumber(value=float(value))
-    return types.JsonString(value=str(value))
-
-
-class FakeConfigClient:
-    """A client answering help.getAppConfig with a given configuration."""
-
-    def __init__(self, raw: dict) -> None:
-        self.raw = raw
-
-    async def __call__(self, request):
-        return types.help.AppConfig(hash=1, config=_json(self.raw))
-
-
 def test_the_app_configuration_is_parsed_into_plain_python():
-    tree = _json({"a": 10, "b": "text", "c": True, "d": None, "e": [1, {"f": 2.5}]})
+    tree = json_tree({"a": 10, "b": "text", "c": True, "d": None, "e": [1, {"f": 2.5}]})
     assert core._json_py(tree) == {
         "a": 10, "b": "text", "c": True, "d": None, "e": [1, {"f": 2.5}],
     }
@@ -418,8 +398,8 @@ def test_the_app_configuration_is_parsed_into_plain_python():
 
 def test_whole_numbers_in_the_configuration_do_not_stay_fractional():
     """Telegram sends every number as a float: "10.0 folders" reads as a bug."""
-    assert core._json_py(_json({"n": 10})) == {"n": 10}
-    assert isinstance(core._json_py(_json({"n": 10}))["n"], int)
+    assert core._json_py(json_tree({"n": 10})) == {"n": 10}
+    assert isinstance(core._json_py(json_tree({"n": 10}))["n"], int)
 
 
 async def test_the_limit_is_taken_by_whether_premium_is_there(service):

@@ -140,9 +140,60 @@ class Daemon:
 
     # ---------- rules ----------
 
-    def _chat_matches(self, patterns: list, chat_id: int, chat_name: str) -> bool:
+    def known_accounts(self) -> set[str]:
+        """The account labels that exist in this installation at all.
+
+        For a running daemon these are its own services: it opens the sessions at
+        startup, and there is no reason to go to disk for the answer — the method
+        is called for every pattern in a rule for every incoming message. Session
+        files are looked at only when there are no services at all (parsing rules
+        without a daemon).
+        """
+        if self.services:
+            return set(self.services) | {config.MAIN_ACCOUNT}
+        try:
+            return set(config.list_accounts()) | {config.MAIN_ACCOUNT}
+        except OSError:
+            return {config.MAIN_ACCOUNT}
+
+    def _scope_of(self, pattern: str) -> tuple[str | None, str]:
+        """Split "work:Mum" into an account and a chat.
+
+        Only an existing account label counts as a prefix, not any word before a
+        colon: chat names like "Lunch: who is coming" are more common than second
+        accounts, and turning them into a rule that silently matches nothing is
+        not allowed. A string without a known prefix stays what it was — an
+        ordinary pattern that applies in every account.
+        """
+        if ":" not in pattern:
+            return None, pattern
+        head, _, tail = pattern.partition(":")
+        head = head.strip()
+        try:
+            label = config.normalize_account(head)
+        except ValueError:
+            return None, pattern
+        if head != label or label not in self.known_accounts():
+            return None, pattern
+        return label, tail.strip()
+
+    def _chat_matches(
+        self, patterns: list, chat_id: int, chat_name: str, account: str | None = None,
+    ) -> bool:
+        """Whether the chat matched a pattern from a rule.
+
+        `account` is the account the message arrived in. A pattern with a prefix
+        applies only in its own account: two different "Mum" chats in a personal
+        and a work account are two different people, and watch/mute for one must
+        not catch the other.
+        """
         for p in patterns or []:
             s = str(p).strip().lower()
+            if not s:
+                continue
+            scope, s = self._scope_of(s)
+            if scope is not None and account and scope != config.normalize_account(account):
+                continue
             if not s:
                 continue
             if s == str(chat_id) or s in (chat_name or "").lower():
@@ -169,7 +220,10 @@ class Daemon:
             return None  # alert-loop guard, not configurable on purpose
         if r.get("ignore_bots") and ev.get("from_bot"):
             return None
-        if self._chat_matches(r.get("mute_chats", []), ev["chat_id"], ev.get("chat", "")):
+        account = ev.get("account")
+        if self._chat_matches(
+            r.get("mute_chats", []), ev["chat_id"], ev.get("chat", ""), account
+        ):
             return None
 
         if self.in_quiet_hours():
@@ -179,7 +233,9 @@ class Daemon:
         for kw in r.get("keywords", []):
             if kw and kw.lower() in text:
                 return "keyword"
-        if self._chat_matches(r.get("watch_chats", []), ev["chat_id"], ev.get("chat", "")):
+        if self._chat_matches(
+            r.get("watch_chats", []), ev["chat_id"], ev.get("chat", ""), account
+        ):
             return "watch"
         if r.get("alert_on_mention") and ev.get("mentioned"):
             return "mention"
@@ -218,8 +274,18 @@ class Daemon:
     def auto_rule_matches(self, rule: dict, ev: dict) -> bool:
         """The same matcher as for alerts: conditions listed together are all ANDed."""
         chats = config.as_list(rule.get("chat"))
-        if chats and not self._chat_matches(chats, ev["chat_id"], ev.get("chat", "")):
+        if chats and not self._chat_matches(
+            chats, ev["chat_id"], ev.get("chat", ""), ev.get("account")
+        ):
             return False
+        # A rule can be bound to a whole account, not only to a chat: otherwise the
+        # filter "everything from work goes to the archive" would have to be spelled
+        # out chat by chat.
+        scope = config.as_list(rule.get("account"))
+        if scope:
+            here = config.normalize_account(ev.get("account"))
+            if not any(config.normalize_account(str(s)) == here for s in scope):
+                return False
         senders = config.as_list(rule.get("from"))
         if senders and not self._sender_matches(senders, ev):
             return False
@@ -740,13 +806,18 @@ class Daemon:
         matcher as the alerts. Muted chats are not highlighted: "muted" means
         "muted", though they still count towards the totals."""
         r = self.rules
-        if self._chat_matches(r.get("mute_chats", []), ev["chat_id"], ev.get("chat", "")):
+        account = ev.get("account")
+        if self._chat_matches(
+            r.get("mute_chats", []), ev["chat_id"], ev.get("chat", ""), account
+        ):
             return None
         text = (ev.get("text") or "").lower()
         for kw in r.get("keywords", []):
             if kw and str(kw).lower() in text:
                 return f"word “{kw}”"
-        if self._chat_matches(r.get("watch_chats", []), ev["chat_id"], ev.get("chat", "")):
+        if self._chat_matches(
+            r.get("watch_chats", []), ev["chat_id"], ev.get("chat", ""), account
+        ):
             return "watched chat"
         return None
 
@@ -894,7 +965,7 @@ class Daemon:
         """
         listed = self.rules.get("memory_chats") or []
         if listed:
-            return self._chat_matches(listed, chat_id, name)
+            return self._chat_matches(listed, chat_id, name, svc.account)
         return svc._memory_store().exists(chat_id)
 
     async def check_memory(self) -> None:
@@ -1057,9 +1128,20 @@ class Daemon:
             pass
         return where
 
-    def _confirm_whitelisted(self, where: dict, whitelist: Any) -> bool:
+    def _confirm_whitelisted(
+        self, where: dict, whitelist: Any, account: str | None = None,
+    ) -> bool:
+        """The confirmation whitelist — bound to an account the same way watch/mute
+        is: "me" in the personal and in the work account are different Saved
+        Messages, and permission granted for one must not silently apply to the
+        other."""
         for p in whitelist or []:
             s = str(p).strip().lower()
+            if not s:
+                continue
+            scope, s = self._scope_of(s)
+            if scope is not None and account and scope != config.normalize_account(account):
+                continue
             if not s:
                 continue
             if where["saved"] and s in SAVED_ALIASES:
@@ -1113,7 +1195,7 @@ class Daemon:
         if mode == "outgoing" and method not in CONFIRM_OUTBOUND:
             return
         where = await self._confirm_target(svc, params)
-        if self._confirm_whitelisted(where, settings.get("confirm_whitelist")):
+        if self._confirm_whitelisted(where, settings.get("confirm_whitelist"), svc.account):
             return
         # The whitelist is checked before the bot on purpose: a chat we were never
         # going to ask about must not run into an unconfigured channel.
@@ -1360,24 +1442,170 @@ class Daemon:
     # ---------- accounts ----------
 
     def service(self, account: str | None = None) -> TelegramService:
-        """The service of the requested account; without a label — the main one."""
+        """The service of the requested account; without a label — the default one.
+
+        The default is taken from disk rather than "whichever comes first": the
+        owner's choice must survive a restart of both Claude and the daemon itself.
+        If the chosen account is gone, the call is not silently swapped for the
+        main one — a message that went to the wrong account cannot be recalled.
+        """
         if not self.services:
-            raise RuntimeError("No account is signed in: `uv run tg login`")
+            raise RuntimeError(
+                "No account is signed in. The owner signs in themselves, the agent "
+                f"never sees the code: {config.login_command()}"
+            )
         if account is None:
-            return self.tg
+            label = config.default_account()
+            svc = self.services.get(label)
+            if svc is None and label != config.MAIN_ACCOUNT:
+                raise ValueError(
+                    f"The default account {label!r} is not signed in (available: "
+                    f"{', '.join(self.services)}). Either sign in — "
+                    f"{config.login_command(label)} — or change the default: "
+                    "tg_account_use(account=..., persist=true)."
+                )
+            return svc if svc is not None else self.tg
         label = config.normalize_account(account)
         svc = self.services.get(label)
         if svc is None:
-            raise ValueError(
-                f"Account {label!r} is not signed in. Available: {', '.join(self.services)}. "
-                f"To add: uv run tg login --account {label}"
-            )
+            raise ValueError(config.not_logged_in(label, list(self.services)))
         return svc
 
-    async def accounts(self) -> dict:
+    async def account_access(self, svc: TelegramService) -> dict:
+        """A short access level for one account — for the account list.
+
+        The full summary costs a request to Telegram and parsing seventy-odd rows;
+        here we need exactly what makes accounts differ from one another. A failed
+        request does not bring the list down: the second account may have lost the
+        network, and that is no reason to stop showing the first.
+        """
+        try:
+            lim = await svc.limits()
+        except Exception as exc:
+            return {
+                "premium": await svc.is_premium(),
+                "known": False,
+                "why": f"{type(exc).__name__}: {exc}",
+            }
+        data = caps.build(
+            whoami=svc.whoami_dict(), premium=bool(lim["premium"]),
+            limits=lim["limits"], single=lim["single"],
+        )
+        s = data["summary"]
         return {
-            "default": self.tg.account if self.tg else None,
-            "accounts": [svc.whoami_dict() for svc in self.services.values()],
+            "premium": bool(lim["premium"]),
+            "known": True,
+            "available": s["available"],
+            "blocked": s["blocked"],
+            "limited": s["limited"],
+            "text": s["text"],
+        }
+
+    async def accounts(
+        self, current: TelegramService | None = None, access: bool = True,
+    ) -> dict:
+        """Who is signed in, where calls go now and where they will go after a restart.
+
+        The two different "defaults" are deliberately given different words here:
+        `using` is this client's account right now, `default` is what lies on disk
+        and applies until the client is switched. While they agree the difference
+        is invisible, and the moment they do not, confusing them is not allowed.
+        """
+        now = (current or self.tg).account if (current or self.tg) else None
+        stored = config.default_account()
+        rows = []
+        for svc in self.services.values():
+            row = svc.whoami_dict()
+            row["active"] = svc.account == now
+            row["default"] = svc.account == stored
+            row["session"] = str(config.session_path(svc.account)) + ".session"
+            row["index"] = str(config.index_path(svc.account))
+            row["memory"] = str(config.memory_dir(svc.account))
+            if access:
+                row["access"] = await self.account_access(svc)
+            rows.append(row)
+        return {
+            "using": now,
+            "using_source": "client choice" if now != stored else "default on disk",
+            "default": stored,
+            "default_persisted": bool(config.load_settings().get("default_account")),
+            "accounts": rows,
+            "add": config.add_account_command(),
+            "note": "Shared across the whole installation: the notification bot, "
+                    "the keys from .env, the alert rules and the write limits. Own "
+                    "to an account: the session, the index, dossiers, Premium.",
+        }
+
+    async def account_use(self, use: str, persist: bool = False) -> dict:
+        """Check the label and, if asked, remember it as the default.
+
+        A one-off switch lives in the MCP server itself and never reaches here: the
+        daemon serves every client at once, and the choice of one of them must not
+        change the behaviour of the rest. Only `persist=true` gets here — the thing
+        that has to survive a restart.
+        """
+        label = config.normalize_account(use)
+        if label not in self.services:
+            raise ValueError(config.not_logged_in(label, list(self.services)))
+        if persist:
+            config.set_default_account(label)
+        return {
+            "using": label,
+            "persisted": bool(persist),
+            "default": config.default_account(),
+            "who": self.services[label].whoami_dict(),
+        }
+
+    async def capabilities(
+        self, svc: TelegramService, chat: Any = None, all_accounts: bool = False,
+    ) -> dict:
+        """The access level: of one account or of all of them at once.
+
+        The summary over all of them is needed precisely because the level differs
+        between accounts: Premium is on one and not on the other, and the promise
+        "I will forward a two-gigabyte file" holds for exactly one of them. The
+        local half of the setup (the bot, the keys, the write permission) is one per
+        installation, and it stands in the summary once instead of being repeated
+        under every account.
+        """
+        if not all_accounts:
+            return await svc.capabilities(chat=chat)
+        rows = {}
+        for label, one in self.services.items():
+            try:
+                lim = await one.limits()
+            except Exception as exc:
+                rows[label] = {"account": label, "error": f"{type(exc).__name__}: {exc}"}
+                continue
+            data = caps.build(
+                whoami=one.whoami_dict(), premium=bool(lim["premium"]),
+                limits=lim["limits"], single=lim["single"],
+            )
+            rows[label] = {
+                "account": label,
+                "you": data["you"],
+                "premium": data["subscription"]["premium"],
+                "summary": data["summary"],
+                "subscription": data["subscription"],
+                # Only what makes this account differ from the next one. The counters
+                # in summary still count every restriction, shared ones included:
+                # "how much is available to me" is a question about the total, not
+                # about the difference.
+                "restricted_account": [
+                    r for r in data["restricted"] if r["nature"] != "local"
+                ],
+            }
+        return {
+            "using": svc.account,
+            "default": config.default_account(),
+            "accounts": rows,
+            # One per installation and therefore lifted out of the accounts: the
+            # bot, the keys and the write permission live in .env, not in the
+            # Telegram session.
+            "shared": {"nature": caps.NATURES["local"], **caps.local_state()},
+            "shared_note": "The notification bot, the keys from .env, the write "
+                           "permission and the alert rules are shared by the "
+                           "installation, not owned by an account.",
         }
 
     # ---------- rpc surface ----------
@@ -1385,6 +1613,9 @@ class Daemon:
     async def status(self) -> dict:
         return {
             "account": self.tg.whoami_dict(),
+            # The default on disk, not "the one the client has right now": status is
+            # also read from the terminal, where there is no client at all.
+            "default_account": config.default_account(),
             "accounts": [svc.whoami_dict() for svc in self.services.values()],
             "uptime_min": round((time.time() - self.started_at) / 60, 1),
             "alerts_sent": self.alert_count,
@@ -1489,7 +1720,11 @@ class Daemon:
         t = svc or self.tg
         return {
             "status": self.status,
-            "accounts": self.accounts,
+            # Both need the calling client's service: the account list has to mark
+            # the active one, and the summary has to know whose access level to show.
+            "accounts": lambda **kw: self.accounts(t, **kw),
+            "account_use": self.account_use,
+            "capabilities": lambda **kw: self.capabilities(t, **kw),
             "whoami": lambda: asyncio.sleep(0, result=t.whoami_dict()),
             "dialogs": t.dialogs,
             "folders": t.folders,
@@ -1513,7 +1748,6 @@ class Daemon:
             "stories": t.stories,
             "sessions": t.sessions,
             "limits": t.limits,
-            "capabilities": t.capabilities,
             "summarize": t.summarize,
             "saved_tags": t.saved_tags,
             "wait": self.wait,
@@ -1580,7 +1814,11 @@ class Daemon:
             )
         method = payload.get("method")
         params = dict(payload.get("params") or {})
-        account = payload.get("account") or params.pop("account", None)
+        # `account` in the call parameters outranks the client's choice: a one-off
+        # "and what is in the work account" must not require switching there and
+        # back. It is always popped out of params, otherwise it would travel into a
+        # core method as an extra keyword argument.
+        account = params.pop("account", None) or payload.get("account")
         try:
             svc = self.service(account)
         except (ValueError, RuntimeError) as exc:
@@ -1598,6 +1836,14 @@ class Daemon:
                 # call that ran into a limit.
                 await self.confirm_write(svc, method, params)
             result = await fn(**params)
+            if method in WRITE_METHODS and isinstance(result, dict):
+                # The answer of a writing call always names the account. Otherwise the
+                # agent knows where it meant to write but not where it wrote: the
+                # default could have been changed in another session, and recalling
+                # the message would be too late. It is set here, in one place, rather
+                # than in each of the three dozen core methods — the core knows
+                # nothing about the client's choice.
+                result.setdefault("account", svc.account)
             self.append_action(method, params, account=svc.account)
             return web.json_response({"ok": True, "result": result})
         except (GuardError, ValueError) as exc:
@@ -1605,10 +1851,16 @@ class Daemon:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         except Exception as exc:
             log(f"call {method} failed:\n{traceback.format_exc()}")
-            self.append_action(method, params, str(exc), svc.account)
-            return web.json_response(
-                {"ok": False, "error": f"{type(exc).__name__}: {exc}"}, status=500
-            )
+            # This is the only door through which a Telegram error reaches the
+            # agent — so this is where it gets translated. From
+            # "ChatAdminRequiredError" the model will not work out what to do next;
+            # from a named restriction it will. An unfamiliar error goes on as it
+            # was, together with the class name: the full text is useful in a
+            # post-mortem, an invented reason is not. The traceback stayed in
+            # daemon.log above in any case.
+            error = caps.explain_error(exc) or f"{type(exc).__name__}: {exc}"
+            self.append_action(method, params, error, svc.account)
+            return web.json_response({"ok": False, "error": error}, status=500)
 
     async def run(self) -> None:
         config.ensure_dirs()
@@ -1616,12 +1868,21 @@ class Daemon:
         self.load_digest_state()
         labels = config.list_accounts()
         if not labels:
-            raise RuntimeError("There is no session at all. Sign in: uv run tg login")
+            raise RuntimeError(
+                "There is no session at all. The owner signs in themselves, the agent "
+                f"never sees the code: {config.login_command()}"
+            )
+        wanted = config.default_account()
         for label in labels:
             svc = TelegramService(label)
             me = await svc.start()
             self.services[label] = svc
-            if self.tg is None or label == config.MAIN_ACCOUNT:
+            # `self.tg` is the "default" account for the bot, the digest and calls
+            # without a label. The one chosen by the owner outweighs the main one,
+            # and the main one outweighs whichever came first.
+            if self.tg is None or label == wanted or (
+                label == config.MAIN_ACCOUNT and self.tg.account != wanted
+            ):
                 self.tg = svc
             log(f"telegram[{label}]: signed in as {me['name']} (id {me['id']})")
             svc.client.add_event_handler(
@@ -1702,6 +1963,10 @@ WRITE_METHODS = {
     # a reminder does not touch the account, but it survives a restart and wakes the
     # owner by itself — creating and cancelling one silently is not allowed
     "remind",
+    # switching the default account writes nothing to Telegram, but it decides where
+    # everything written afterwards goes, and it survives a restart: it belongs in
+    # the audit
+    "account_use",
 }
 
 # Into the log only, but not under confirmation. Indexing does not change a single
@@ -1735,6 +2000,9 @@ CONFIRM_CONDITIONAL = {
     "stories": "mark_read",
     "scheduled": "cancel_ids",
     "sessions": "terminate",
+    # without persist the switch lives only in the current client session and
+    # changes nothing on disk; asking makes sense only about a permanent default
+    "account_use": "persist",
 }
 
 CONFIRM_PREVIEW_LEN = 350

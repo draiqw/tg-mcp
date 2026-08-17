@@ -116,9 +116,16 @@ Code, otherwise the new server will not show up in the current session.
 ## Several accounts
 
 The daemon serves all signed-in accounts at once. The client has two tools:
-`tg_accounts` shows the list, `tg_account_use` switches the current one for the
-duration of the session. There is no need to set up a separate MCP server for a second
-account — and it is not worth it, because a single daemon owns the sessions anyway.
+`tg_accounts` shows the list and where calls go, `tg_account_use` switches the current
+one — for the duration of the session or, with `persist=true`, for good. There is no need
+to set up a separate MCP server for a second account — and it is not worth it, because a
+single daemon owns the sessions anyway.
+
+The persistent default lives in `data/settings.json`, a one-off switch lives in the
+MCP server process. So in a fresh Claude session the agent starts from the account the
+owner chose as the default, not from the main one "because we restarted". Details and a
+breakdown of what accounts share and what they keep apart are in
+[configuration.md](configuration.md#multiple-accounts).
 
 ## Diagnostics
 

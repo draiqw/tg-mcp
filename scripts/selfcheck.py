@@ -242,6 +242,8 @@ DAEMON_OWN = {
     "status", "accounts", "events", "rules", "alert", "whoami", "wait", "ask",
     # reminders need the tick and the bot channel, the action log needs the daemon's file
     "remind", "actions",
+    # the default account choice: an installation setting, not an operation in Telegram
+    "account_use",
 }
 
 # Some of the core methods are named differently from the daemon method.

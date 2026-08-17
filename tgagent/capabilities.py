@@ -12,10 +12,11 @@ because each is cured differently:
   the account, and they do not carry over to another chat.
 
 Here live the "which tool needs what" tables, the checks of the local half (by fact, not
-by the manifest) and the human text of the digest. There are no calls to Telegram here:
-`TelegramService.capabilities` makes them, because only the server knows the subscription
-and the limits. The split is needed for the CLI: `tg setup` and `tg login` show the local
-half even without a running daemon.
+by the manifest), the human text of the digest and the translation of typical Telegram
+errors — the same limit, just learned in the middle of the work. There are no calls to
+Telegram here: `TelegramService.capabilities` makes them, because only the server knows
+the subscription and the limits. The split is needed for the CLI: `tg setup` and
+`tg login` show the local half even without a running daemon.
 """
 
 from __future__ import annotations
@@ -586,6 +587,13 @@ WAIT_HINTS: dict[str, str] = {
         "{seconds} s. This is not a refusal — repeat after a pause.",
 }
 
+# The server sends SLOWMODE_WAIT as one word, while the Telethon class is called
+# SlowModeWaitError, and from its name the code is assembled as SLOW_MODE_WAIT. One limit
+# arrives under two codes — which one exactly depends on whether the library parsed the
+# error into a class; both have to be known, otherwise the explanation goes only to the
+# unfamiliar variant.
+WAIT_HINTS["SLOW_MODE_WAIT"] = WAIT_HINTS["SLOWMODE_WAIT"]
+
 
 def error_codes(exc: Exception) -> list[str]:
     """Telegram codes an error is recognised by: the exact one first, then from the text.
@@ -613,6 +621,12 @@ def explain_error(exc: Exception) -> str | None:
     with None (the daemon hands back the error code, as before).
     """
     seconds = getattr(exc, "seconds", None)
+    if not isinstance(seconds, int):
+        # An unfamiliar error is not parsed into a class by Telethon, and the number of
+        # seconds stays only in its text (FLOOD_WAIT_18). A "wait" without the number is
+        # half an answer, so we take it from there.
+        found = re.search(r"[A-Z][A-Z0-9_]*WAIT_(\d+)", str(exc))
+        seconds = int(found.group(1)) if found else None
     for code in error_codes(exc):
         if code in WAIT_HINTS and isinstance(seconds, int):
             return WAIT_HINTS[code].format(seconds=seconds)

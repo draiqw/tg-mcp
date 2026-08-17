@@ -33,6 +33,15 @@ class GuardError(RuntimeError):
 
 HOUR_SEC = 3600
 
+# Account facts that change without us: a subscription can be bought on the
+# phone, and Telegram caps recalculated on the server. Asking for them before
+# every action is an extra request on every call; remembering them until the
+# daemon restarts is impossible — the daemon lives for weeks, and a Premium
+# bought meanwhile would wait for that restart. Ten minutes: that much the owner
+# writes off as "not refreshed yet" rather than a breakage, and that much a
+# check tolerates instead of going to the network.
+ACCOUNT_FACTS_TTL = 600
+
 
 class RateGuard:
     """Sliding hour: a runaway loop must not spray spam or wipe out a chat."""
@@ -262,6 +271,17 @@ def tg_error_text(exc: Exception) -> str:
     return str(exc).split(" (caused")[0]
 
 
+def explain(exc: Exception) -> str:
+    """The error in one line for whoever reads it: a person or the model.
+
+    A typical Telegram restriction is named in words (the table in
+    `capabilities`), everything else is handed over as is: an invented reason is
+    worse than raw text. The class name is used only when the exception has no
+    text at all — an empty string instead of an error would read as "all fine".
+    """
+    return caps.explain_error(exc) or tg_error_text(exc) or type(exc).__name__
+
+
 def _assert_text_len(text: str, what: str) -> None:
     """Telegram has one length limit for all messages; we name it with the number
     from LIMITS, not a constant in the text — otherwise editing the limit would
@@ -275,11 +295,13 @@ def _assert_text_len(text: str, what: str) -> None:
 
 
 def _flood_text(exc: FloodWaitError) -> str:
-    """Flood-wait is not a refusal but a "too often": wait as long as told."""
-    return (
-        f"Telegram asks you to wait {exc.seconds} s: too many requests in a row. "
-        "This is not a refusal — retry after a pause."
-    )
+    """Flood-wait is not a refusal but a "too often": wait as long as told.
+
+    The text comes from the shared table of waits and is not written here: one
+    and the same restriction, explained in two different wordings, reads as two
+    different ones.
+    """
+    return explain(exc)
 
 
 def _user_status(user) -> str | None:
@@ -530,6 +552,12 @@ class TelegramService:
         self.me = None
         self._dialog_cache: list[dict[str, Any]] = []
         self._dialog_cache_at = 0.0
+        # None means "nothing is known about the subscription"; that is not the
+        # same as "no" (see is_premium), so False as a default will not do here.
+        self._premium: bool | None = None
+        self._premium_at = 0.0
+        self._app_config_cache: dict | None = None
+        self._app_config_at = 0.0
 
     # ---------- lifecycle ----------
 
@@ -537,15 +565,46 @@ class TelegramService:
         await self.client.connect()
         if not await self.client.is_user_authorized():
             raise RuntimeError(
-                "The session is not authorised: the sign-in code is entered by the "
-                "owner, the agent never sees it. Run `uv run tg login` in your own "
-                "terminal."
+                f"The session of account {self.account!r} is not authorised: the "
+                "sign-in code is entered by the owner, the agent never sees it. Run "
+                f"`{config.login_command(self.account)}` in your own terminal."
             )
         self.me = await self.client.get_me()
+        self._remember_premium()
         return self.whoami_dict()
 
     async def stop(self) -> None:
         await self.client.disconnect()
+
+    def _remember_premium(self) -> None:
+        """Remember the subscription flag from the profile already read."""
+        self._premium = bool(getattr(self.me, "premium", False))
+        self._premium_at = time.monotonic()
+
+    async def is_premium(self) -> bool | None:
+        """Whether the account has Premium: True, False or None — "could not find out".
+
+        Three values instead of two, on purpose. "There is no subscription" is a
+        ground to refuse before going to the network, "I do not know" is not: a
+        refusal by guesswork is worse than an honest attempt, and on None the
+        call proceeds as before, for Telegram's own answer.
+
+        The flag lives in the profile read at daemon startup, and the daemon
+        runs for weeks — so the profile is re-read, but no more often than once
+        per ACCOUNT_FACTS_TTL. A failed read leaves the previous value: it does
+        not spoil what we know, and turning a network failure into a refusal is
+        pointless.
+        """
+        if self._premium_at and time.monotonic() - self._premium_at < ACCOUNT_FACTS_TTL:
+            return self._premium
+        try:
+            me = await self.client.get_me()
+        except Exception:
+            return self._premium
+        if me is not None:
+            self.me = me
+            self._remember_premium()
+        return self._premium
 
     def whoami_dict(self) -> dict:
         m = self.me
@@ -2950,6 +3009,36 @@ class TelegramService:
         row.update({"path": str(p), "mime": mime, "bytes": p.stat().st_size})
         return row
 
+    async def _assert_transcribe_allowed(self) -> None:
+        """Refuse the built-in transcription before the request when it is bound to fail.
+
+        The check stands before the network because both of its terms are known
+        already: the subscription flag was read together with the profile, the
+        number of free transcripts lies in the app configuration. It does not
+        make the call any dearer — the configuration is asked for only on an
+        account without Premium and no more often than once per
+        ACCOUNT_FACTS_TTL — and in exchange the agent learns about the
+        restriction in words, before going to Telegram for nothing.
+
+        A refusal only on two known "no"s: there is no subscription and the
+        account is entitled to no free transcripts. An unknown subscription or an
+        unknown counter is no ground to refuse: an attempt is more honest than a
+        guess, and Telegram's answer will be translated anyway
+        (PREMIUM_ACCOUNT_REQUIRED).
+        """
+        if await self.is_premium() is not False:
+            return
+        trial = await self._transcribe_trial()
+        if trial is None or trial > 0:
+            return
+        raise ValueError(
+            "Telegram computes the built-in transcription for Premium only, and "
+            "gives this account no free transcripts at all (in tg_limits the key "
+            "transcribe_audio_trial_weekly_number = 0). There is no way around it "
+            "locally: take another engine — engine=\"groq\" (needs GROQ_API_KEY) "
+            "or engine=\"local\"."
+        )
+
     async def _messages_for_audio(
         self, chat: Any, message_ids: list | None, kind: str, limit: int
     ) -> tuple[Any, list]:
@@ -2970,8 +3059,13 @@ class TelegramService:
         return ent, msgs
 
     async def _transcribe_telegram(self, ent, msg) -> str:
-        """The built-in Telegram transcription. Voice messages and round notes only,
-        Premium is needed."""
+        """The built-in Telegram transcription: voice messages and round notes only.
+
+        Premium is needed — or the metered free transcripts Telegram gives even
+        without a subscription; the case that is bound to fail is cut off before
+        the request.
+        """
+        await self._assert_transcribe_allowed()
         peer = await self.client.get_input_entity(ent)
         res = await self.client(
             functions.messages.TranscribeAudioRequest(peer=peer, msg_id=msg.id)
@@ -3122,7 +3216,11 @@ class TelegramService:
                         row["engine"] = candidate
                         break
                     except Exception as exc:
-                        errors[candidate] = f"{type(exc).__name__}: {exc}"
+                        # An engine error is explained in words right here: it
+                        # travels upwards not as an exception but as a field of
+                        # the row, and there will be no other place to translate
+                        # it.
+                        errors[candidate] = explain(exc)
                 if "text" not in row:
                     row["error"] = "; ".join(f"{k}: {v}" for k, v in errors.items())
                 elif errors:
@@ -3336,16 +3434,40 @@ class TelegramService:
     async def _app_config(self) -> dict:
         """The app configuration in one request — the source of every cap.
 
-        A separate method because two parties read it: `limits` and
-        `capabilities`. The second may not have its own copy of the limits table
-        — otherwise "how much is allowed" and "what is available to me" would
-        drift apart on one and the same account.
+        A separate method because three parties read it: `limits`,
+        `capabilities` and the checks before an action. None of them may have its
+        own copy of the limits table — otherwise "how much is allowed" and "what
+        is available to me" would drift apart on one and the same account.
+
+        The answer is held for ACCOUNT_FACTS_TTL: the server changes these
+        numbers rarely, while a check before an action would otherwise add a
+        request to every call.
         """
+        if (self._app_config_cache is not None
+                and time.monotonic() - self._app_config_at < ACCOUNT_FACTS_TTL):
+            return self._app_config_cache
         res = await self.client(functions.help.GetAppConfigRequest(hash=0))
         raw = _json_py(getattr(res, "config", None))
         if not isinstance(raw, dict):
             raise ValueError("Telegram did not hand out the app configuration")
+        self._app_config_cache = raw
+        self._app_config_at = time.monotonic()
         return raw
+
+    async def _transcribe_trial(self) -> int | None:
+        """How many free transcripts a week Telegram gives without Premium.
+
+        None means "unknown": the key is not in the configuration or asking
+        failed. One may not refuse on this answer; it is needed for exactly one
+        thing — to tell "the built-in transcription does not work here at all"
+        from "it works, but on a meter".
+        """
+        try:
+            raw = await self._app_config()
+        except Exception:
+            return None
+        value = raw.get("transcribe_audio_trial_weekly_number")
+        return value if isinstance(value, int) else None
 
     async def limits(self, full: bool = False) -> dict:
         """The caps Telegram itself sets, and which of them apply here.
@@ -3903,7 +4025,10 @@ class TelegramService:
     def _invites_error(exc: Exception, chat: str) -> ValueError:
         """Telegram answers with a dry code — we turn it into an explanation."""
         name = type(exc).__name__
-        text = tg_error_text(exc)
+        # About invites the text is more precise than the general one ("only the
+        # one who manages them sees them"), so our own cases are handled first
+        # and the general table stays the fallback for everything else.
+        text = explain(exc)
         if "ChatAdminRequired" in name:
             return ValueError(
                 f"\"{chat}\": admin rights are needed — invites are seen only by the one "
@@ -4091,11 +4216,27 @@ class TelegramService:
         a list: Telegram Premium allows several reactions on one message.
         """
         self._assert_write()
-        ent = await self.resolve(chat)
-        peer = await self.client.get_input_entity(ent)
         wanted = [] if emoji is None else (emoji if isinstance(emoji, list) else [emoji])
         if len(wanted) > 3:
             raise ValueError("Telegram allows no more than three reactions on a message")
+        # What will fail because of the subscription is visible before the chat:
+        # both the number of reactions and the right to a custom emoji are
+        # properties of the account, not of this message. On an unknown
+        # subscription (None) we do not refuse: let Telegram answer.
+        if wanted and await self.is_premium() is False:
+            if len(wanted) > 1:
+                raise ValueError(
+                    "only Premium puts several reactions on one message: without a "
+                    "subscription Telegram accepts one. Leave one."
+                )
+            if str(wanted[0]).isdigit():
+                raise ValueError(
+                    "a custom emoji in a reaction is a Premium capability: without a "
+                    "subscription Telegram will not accept it. Put a plain emoji; "
+                    "which ones this chat allows, tg_capabilities(chat=...) will show."
+                )
+        ent = await self.resolve(chat)
+        peer = await self.client.get_input_entity(ent)
         try:
             await self.client(
                 functions.messages.SendReactionRequest(

@@ -7,14 +7,14 @@ the code talks to Telegram. Everything else is transport and scaffolding:
 
 | File | Lines | Role |
 |---|---|---|
-| **`tgagent/core.py`** | 5040 | **core: all account operations, chat resolution, limits** |
-| `tgagent/daemon.py` | 1767 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
-| `tgagent/mcp_server.py` | 1498 | 79 tools, each one a single call to the daemon |
+| **`tgagent/core.py`** | 5181 | **core: all account operations, chat resolution, limits** |
+| `tgagent/daemon.py` | 2035 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
+| `tgagent/mcp_server.py` | 1558 | 79 tools, each one a single call to the daemon |
 | `tgagent/index.py` | 670 | local index of the correspondence: sqlite + FTS5, Russian morphology |
 | `tgagent/memory.py` | 234 | chat dossiers: file format, prompt, language-model call |
-| `tgagent/cli.py` | 587 | setup, sign-in, daemon control |
-| `tgagent/config.py` | 341 | paths, `.env`, rules, limits |
-| `tgagent/capabilities.py` | 750 | tables of "what a given tool needs", checks of the local setup, summary text |
+| `tgagent/cli.py` | 620 | setup, sign-in, daemon control |
+| `tgagent/config.py` | 420 | paths, `.env`, rules, limits |
+| `tgagent/capabilities.py` | 764 | tables of "what a given tool needs", checks of the local setup, summary text, translation of Telegram errors |
 | `tgagent/alerts.py` | 138 | Bot API: alerts, commands, buttons under the agent's questions |
 
 The rule is simple: a new capability goes into `core.py` as a `TelegramService`
@@ -89,8 +89,20 @@ not in the core: the core knows nothing about the bot and must not know.
 
 Errors are classified in the daemon: `GuardError` and `ValueError` (limit exceeded,
 chat not found, ambiguous name) are returned as 400 with human-readable text,
-everything else as 500 with the exception type. The agent sees "Send guard: 60 messages already in the last hour",
+everything else as 500. The agent sees "Send guard: 60 messages already in the last hour",
 not a traceback.
+
+The same place is where a Telegram error is translated into human language:
+`handle_call` is the single door through which it leaves for the agent, and a typical
+server answer is replaced by an explanation from `capabilities.ERROR_HINTS` (no admin
+rights, a subscription is required, a limit was hit, wait so many seconds). The same
+text is written to `actions.jsonl` — a divergence between the log and the answer would
+read as two different refusals. An unfamiliar error goes up as it was, together with
+the class name: the raw text is more useful than an invented reason, and the traceback
+stays in `daemon.log` in any case. Some of the restrictions are named even earlier —
+before the request, from the account properties that the core keeps in memory for ten
+minutes (`ACCOUNT_FACTS_TTL`); see "Refusal instead of a raw Telegram error" in
+docs/tools.md.
 
 **An incoming message.**
 
@@ -197,7 +209,10 @@ protection against self-disabling (`save_rules` does not reset the confirmation 
 the dossier format and the ban on executing instructions from the correspondence, the
 morphology and the index queries, the slicing of links by UTF-16 offsets, the write
 limits, the order of checks in `alert_reason`, the inbox filters, the write
-confirmation, the reminders and the digest.
+confirmation, the reminders and the digest. Refusals are there too: that a typical
+Telegram error reaches the agent as an explanation rather than as a class name, and
+that the check before an action refuses only on known properties of the account, while
+on "I do not know" it lets the call through.
 
 The tests need neither the network, nor the session file, nor keys: `tests/conftest.py`
 points `TG_ENV_FILE` at a non-existent file and `TG_DATA_DIR` at a temporary directory,
@@ -251,13 +266,15 @@ Everything in `data/` (or in `TG_DATA_DIR`):
 | `session-<label>.session` | the second, third and so on account |
 | `daemon.sock` | the RPC socket, mode 600, recreated at start |
 | `daemon.pid` | the pid of the live daemon, `tg daemon stop` works by it |
-| `rules.json` | the alert rules, survive a restart |
+| `rules.json` | the alert rules, survive a restart. Shared by all accounts — why, in [configuration.md](configuration.md#rules-and-filters-one-file-for-all-accounts) |
+| `settings.json` | installation settings: the default account. Separate from the rules, because it describes not "when to wake up" but "where to write" |
 | `events.jsonl` | everything incoming that the watcher saw. Rotated at 20 MB |
 | `actions.jsonl` | the audit: what the agent sent, deleted, changed; read through `tg_actions` |
 | `reminders.json` | the active `tg_remind` reminders, survive a restart |
 | `digest.json` | the last processed digest deadline and the start of the period for the next one |
 | `index.db` | the local index of the correspondence (`tg_index`), mode 600. Created only by an explicit command of the owner, removed by `action="drop"` |
 | `index-<label>.db` | the same for the second, third and so on account |
+| `memory/`, `memory-<label>/` | chat dossiers, one folder per account: the same person in two accounts is two different conversations |
 | `daemon.log` | the daemon's log (in docker — the ordinary container log) |
 | `downloads/` | attachments land here by default |
 | `login_state.json` | temporary, between `send-code` and `sign-in` |

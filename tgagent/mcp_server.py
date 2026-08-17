@@ -23,17 +23,20 @@ mcp = MCPServer("telegram")
 
 _DAEMON_HINT = (
     "The Telegram daemon is not answering — no tool works without it. "
-    "Start it: `cd ~/tg-agent && uv run tg daemon start` "
-    "(if the session has not been created yet, first `uv run tg login` — the owner "
-    "does that themselves)."
+    f"Start it: `cd {config.ROOT} && uv run tg daemon start` "
+    f"(if the session has not been created yet, first `{config.login_command()}` — "
+    "the code and the password are entered by the owner themselves, the agent "
+    "does not see them)."
 )
 
 
 AUTOSTART_TRIES = 30
 AUTOSTART_PAUSE_SEC = 0.3
 
-# Which account serves this client session. None = the main one. Lives in the MCP
-# server process, that is, the switch only applies in the current Claude session.
+# Which account serves this client session. None — "follow the default from
+# disk" (data/settings.json), which survives a restart and is shared by every
+# client. A non-empty value is a one-off switch: it lives in the MCP server
+# process and dies together with the Claude session, without touching the others.
 _ACCOUNT: str | None = None
 
 
@@ -98,30 +101,63 @@ async def tg_status() -> str:
 
 
 @mcp.tool()
-async def tg_accounts() -> str:
+async def tg_accounts(access: bool = True) -> str:
     """Which Telegram accounts this daemon holds, and which one your calls go to.
 
-    More than one account can be signed in at once (`tg login --account work`).
-    Every other tool works on the account selected with tg_account_use.
+    Each row carries the label, the person behind it (name, id, @username, masked
+    phone), whether it has Premium, whether your calls go there right now
+    ("active"), whether it is the stored default, and the files that belong to it
+    alone: session, search index, chat dossiers.
+
+    Two different notions of "default" are reported side by side and must not be
+    confused: `using` is the account this client writes to at this moment, while
+    `default` is what is stored on disk and survives a restart. They differ only
+    after a session-only tg_account_use.
+
+    More than one account can be signed in at once; only the owner can add one,
+    and the `add` field spells out the exact command. Premium is a fact about one
+    account; the notification bot, the .env keys, the alert rules and the write
+    limits belong to the installation and are shared by all of them.
+
+    Args:
+        access: also report each account's access level (Premium plus how many
+                tools are available and blocked). Costs one cached request to
+                Telegram per account; pass false when only the list is needed.
     """
-    return j(await call("accounts"))
+    return j(await call("accounts", access=access))
 
 
 @mcp.tool()
-async def tg_account_use(account: str) -> str:
-    """Point every following tool call at this account ("main" for the default one).
+async def tg_account_use(account: str, persist: bool = False) -> str:
+    """Point the following tool calls at this account ("main" for the default one).
 
-    The switch lasts for this session only — it does not affect other clients or
-    the background watcher, which always covers every signed-in account.
+    By default the switch lasts for this session only: it does not affect other
+    clients, and it is forgotten when Claude closes. With `persist=true` the
+    choice is written to disk and becomes the account every client starts from,
+    including after a daemon restart — use it when the owner says "work from this
+    account from now on", not for one errand.
+
+    Either way the background watcher is unaffected: it always covers every
+    signed-in account.
+
+    A single call can also be aimed elsewhere without switching at all —
+    tg_capabilities takes an `account` argument. Check tg_accounts if unsure
+    where you are writing right now; every write tool also names the account it
+    wrote to in its answer.
+
+    Args:
+        account: label of a signed-in account, or "main" for the primary one.
+                 The owner adds accounts from a terminal; the agent cannot.
+        persist: remember this account as the default for every client and every
+                 restart, instead of only this session.
     """
     global _ACCOUNT
-    label = None if account.strip().lower() in ("main", "default", "") else account.strip()
-    known = await call("accounts")
-    labels = [a.get("account") for a in known.get("accounts", [])]
-    if label is not None and label not in labels:
-        raise RuntimeError(f"Account {label!r} is not signed in. Available: {', '.join(labels)}")
+    label = config.normalize_account(account)
+    res = await call("account_use", use=label, persist=persist)
+    # The label is set with persist as well: this client has to write where all
+    # the others now write, instead of staying on the previous account.
     _ACCOUNT = label
-    return j({"using": label or "main", "available": labels})
+    return j(res)
 
 
 @mcp.tool()
@@ -338,7 +374,9 @@ async def tg_transcribe(
               voice, round, music, video, media, file.
         limit: how many recent items to transcribe (max 20).
         engine: "auto" tries Telegram's own transcription first (instant, free,
-                voice and round only), then Groq, then the local model.
+                voice and round only; it needs Premium or a free weekly quota,
+                and is skipped without a request when the account has neither),
+                then Groq, then the local model.
                 Force one with "telegram", "groq" or "local".
         language: ISO code like "ru" or "en" — improves accuracy, optional.
     """
@@ -890,7 +928,11 @@ async def tg_draft(
 
 @mcp.tool()
 async def tg_react(chat: str, message_id: int, emoji: str | None = None, big: bool = False) -> str:
-    """React to a message with an emoji. Omit `emoji` to remove your reaction."""
+    """React to a message with an emoji. Omit `emoji` to remove your reaction.
+
+    A custom-emoji id, or a list of several reactions, needs Premium: without a
+    subscription Telegram takes exactly one plain emoji, and both attempts are
+    refused before the chat is even looked up."""
     return j(await call("react", chat=chat, message_id=message_id, emoji=emoji, big=big))
 
 
@@ -1367,7 +1409,11 @@ async def tg_limits(full: bool = False) -> str:
 
 
 @mcp.tool()
-async def tg_capabilities(chat: str | None = None) -> str:
+async def tg_capabilities(
+    chat: str | None = None,
+    account: str | None = None,
+    all_accounts: bool = False,
+) -> str:
     """What this agent can and cannot do here, and what would unblock the rest.
 
     Start here when you are unsure whether something is possible at all — it is
@@ -1383,13 +1429,27 @@ async def tg_capabilities(chat: str | None = None) -> str:
     the other tier's number, so "20 folders, 10 without Premium" is a fact about
     this account rather than an advertisement.
 
+    The answer describes one account. With several accounts signed in the level
+    is not the same for all of them — Premium is bought per account — so pass
+    `all_accounts=true` before promising something the owner will read as a
+    promise about "Telegram" in general. That comparison reports what actually
+    differs (Premium, subscription-driven tools, server ceilings) once per
+    account, and the shared half of the setup (write mode, notification bot,
+    keys in .env, alert rules) once for the whole installation, because it
+    belongs to the installation and not to any account.
+
     Args:
         chat: also report this chat (id, @username, exact title or "me"): the
               role there, whether messages can be sent, which reactions the chat
               allows, whether slowmode is on. Only this part costs a request
               about a chat, so pass it only when the question is about that chat.
+        account: ask about this account instead of the current one, without
+                 switching to it. Ignored when all_accounts is set.
+        all_accounts: compare every signed-in account instead of describing one.
+                      Chat rights are per account and are not reported here.
     """
-    return j(await call("capabilities", chat=chat))
+    return j(await call("capabilities", chat=chat, account=account,
+                        all_accounts=all_accounts))
 
 
 @mcp.tool()

@@ -136,7 +136,11 @@ and locations — consumes the shared quota of 60 messages and 15 chats per hour
 About multiple accounts: the limits are shared per process, not per account — a
 second session does not double the cap. An `account` field is written into
 `actions.jsonl` and `events.jsonl`, so you can see which account something went
-out from. And remember that each account's session file is full access to it
+out from, and the response of every writing call names the account too — the
+agent must not learn about a wrong recipient from the correspondence. The
+default account lives in `data/settings.json` and survives a restart; a default
+account that has disappeared is not silently substituted with the main one — the
+call refuses. And remember that each account's session file is full access to it
 without a password.
 
 Drafts (`tg_draft`) stand apart: they send nothing and spend no quota. This is

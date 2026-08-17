@@ -63,6 +63,7 @@ _PATHS = {
     "DAEMON_LOG": "daemon.log",
     "PID_FILE": "daemon.pid",
     "RULES_FILE": "rules.json",
+    "SETTINGS_FILE": "settings.json",
     "REMINDERS_FILE": "reminders.json",
     "DIGEST_FILE": "digest.json",
     "DOWNLOADS": "downloads",
@@ -122,11 +123,48 @@ class FakeService:
     exactly what was done".
     """
 
-    def __init__(self, account: str = "main", entities: dict | None = None) -> None:
+    def __init__(
+        self,
+        account: str = "main",
+        entities: dict | None = None,
+        premium: bool = False,
+        user_id: int | None = None,
+        name: str | None = None,
+    ) -> None:
         self.account = account
         self.calls: list[tuple[str, dict]] = []
         self.entities = entities or {}
+        self.premium = premium
+        self.user_id = user_id if user_id is not None else abs(hash(account)) % 10**9
+        self.name = name or f"Owner {account}"
         self.client = self._Client(self)
+
+    def whoami_dict(self) -> dict:
+        return {
+            "account": self.account,
+            "id": self.user_id,
+            "name": self.name,
+            "username": None,
+            "phone": None,
+            "premium": self.premium,
+        }
+
+    async def is_premium(self) -> bool:
+        return self.premium
+
+    async def limits(self, full: bool = False) -> dict:
+        """Exactly the shape read by caps.build and by the per-account digest."""
+        self.calls.append(("limits", {"full": full}))
+        return {
+            "account": self.account,
+            "premium": self.premium,
+            "limits": {},
+            "single": {},
+        }
+
+    async def capabilities(self, chat: Any = None) -> dict:
+        self.calls.append(("capabilities", {"chat": chat}))
+        return {"account": self.account, "chat": chat}
 
     class _Client:
         def __init__(self, outer: FakeService) -> None:
@@ -297,6 +335,35 @@ def make_entity(kind: str, offset: int, length: int, url: str | None = None) -> 
     return obj
 
 
+def json_tree(value: Any) -> Any:
+    """A Python value — into a tree of MTProto JSON types, as Telegram sends them."""
+    if isinstance(value, dict):
+        return types.JsonObject(
+            value=[types.JsonObjectValue(key=k, value=json_tree(v)) for k, v in value.items()]
+        )
+    if isinstance(value, list):
+        return types.JsonArray(value=[json_tree(v) for v in value])
+    if value is None:
+        return types.JsonNull()
+    if isinstance(value, bool):
+        return types.JsonBool(value=value)
+    if isinstance(value, (int, float)):
+        return types.JsonNumber(value=float(value))
+    return types.JsonString(value=str(value))
+
+
+class FakeConfigClient:
+    """A client answering help.getAppConfig with a given configuration."""
+
+    def __init__(self, raw: dict) -> None:
+        self.raw = raw
+        self.calls = 0
+
+    async def __call__(self, request: Any) -> Any:
+        self.calls += 1
+        return types.help.AppConfig(hash=1, config=json_tree(self.raw))
+
+
 def make_event(**over: Any) -> dict:
     """An event of the log — what alert_reason, the filters and the digest work on."""
     # The name and the text stay Cyrillic on purpose: this event travels through
@@ -338,6 +405,13 @@ def service() -> TelegramService:
     svc.guard = RateGuard(dict(config.LIMITS))
     svc._dialog_cache = []
     svc._dialog_cache_at = 0.0
+    # The account property caches are empty: "nothing is known about the
+    # subscription" — the same state the service lives in until Telegram's first
+    # answer.
+    svc._premium = None
+    svc._premium_at = 0.0
+    svc._app_config_cache = None
+    svc._app_config_at = 0.0
     return svc
 
 

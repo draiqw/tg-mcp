@@ -168,8 +168,9 @@ uv run tg send-code +7XXXXXXXXXX      # the same in three steps, without the int
 uv run tg sign-in --code 12345
 uv run tg password                    # the 2FA cloud password, only from a live tty
 uv run tg link-bot                    # link the chat_id for alerts
-uv run tg accounts                    # which accounts are signed in
+uv run tg accounts                    # which accounts are signed in and which one is default
 uv run tg login --account work        # add a second account
+uv run tg accounts --default work     # change the default account for good
 uv sync --extra local-whisper         # local audio transcription (optional)
 uv run tg daemon start|run|stop|restart|logs
 uv run tg call dialogs '{"limit": 5}' # poke a daemon method bypassing MCP
@@ -182,7 +183,7 @@ uv run tg logout                      # revoke the session and wipe the files
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | the core, the layers, the invariants, the flow of data, what lives where |
 | [docs/tools.md](docs/tools.md) | a reference for every MCP tool with its parameters |
-| [docs/configuration.md](docs/configuration.md) | environment variables, the three write modes, alert rules, the digest, inbox filters, limits |
+| [docs/configuration.md](docs/configuration.md) | environment variables, the three write modes, alert rules, the digest, inbox filters, several accounts, limits |
 | [docs/mcp.md](docs/mcp.md) | connecting as an MCP server, the subagents, diagnostics |
 | [docs/docker.md](docs/docker.md) | build, sign-in inside the container, updating, backup |
 | [docs/security.md](docs/security.md) | the threat model: what is protected, what is not, how to revoke access |
