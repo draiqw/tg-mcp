@@ -1,6 +1,6 @@
 # MCP tools
 
-70 tools. Each one is a thin wrapper over a core method; all the logic is in
+76 tools. Each one is a thin wrapper over a core method; all the logic is in
 `tgagent/core.py`.
 
 ## Accounts
@@ -52,9 +52,26 @@ A list of chats, freshest first, with unread counts and links.
 `kind`: `user` / `bot` / `group` / `channel`. `kind="group"` is the answer to
 "which groups am I in". `query` filters by title.
 
+Two `kind` values return not ordinary dialogs but separate Telegram slices:
+
+- `kind="inactive"` — groups and channels where nothing has happened for a long
+  time; exactly the list Telegram itself offers when cleaning up subscriptions;
+- `kind="saved"` — the subfolders of Saved Messages (see
+  `tg_history(saved_from=...)` below): the name of the original author, how much
+  is saved from them, the last message and its date. The counter has to be
+  fetched by a separate request per subfolder — in the dialog list Telegram
+  sends only the last message, not the count.
+
 ### `tg_status()`
 Who is signed in, daemon uptime, how many alerts have been sent, whether writing
-is allowed, the current rules, pid.
+is allowed, the current rules, pid. In `digest` — the state of the scheduled
+digests: the last deadline handled, the time of the last send and the start of
+the period for the next one.
+
+The `confirm_*` keys in the rules are always shown from disk, not from the
+daemon's memory: the confirmation mode is edited by file and takes effect
+immediately, so a status showing a stale `off` would lie in the least convenient
+direction.
 
 ## Reading
 
@@ -62,17 +79,144 @@ is allowed, the current rules, pid.
 Everything unread, grouped by chat, with the latest incoming messages. Every
 chat is marked as archived or not. By default it looks at **both** folders.
 
-### `tg_history(chat, limit=40, before_id=None, from_user=None, search=None, topic=None)`
+### `tg_pending(limit=30, direction="theirs", min_age_hours=0, kind=None, archived=None, include_bots=False)`
+Conversations left hanging: whom you have not answered and who has not answered
+you. It looks not at the unread counter but at whose message is last in the chat
+(`out`) — which is why, unlike `tg_unread`, the read-and-forgotten lands here.
+Open a chat and it disappears from `tg_unread` forever, although you still have
+not replied; `tg_pending` holds on to it.
+
+| direction | What it shows |
+|---|---|
+| `theirs` | the last message is incoming — the debt is yours (default) |
+| `mine` | the last one is yours and no answer came — the debt is theirs |
+| `both` | both slices in one list, each row with its own `direction` |
+
+Sorted by age, oldest first: the top row is the most neglected conversation. A
+row carries the age in hours, `unread`/`read`, the author of the last message
+(`last_from`, `"you"` for your own), a fragment of the text, a link and whether
+the chat is archived.
+
+`min_age_hours` cuts off the fresh ones: `24` or `48` leave only what has had
+time to go stale. `kind` narrows down to a single type and at the same time
+cancels the default filtering.
+
+Channels are always thrown out, except with an explicit `kind="channel"`: in a
+broadcast the last message is incoming by definition, and the whole list would
+degenerate into a feed of subscriptions. Bots are thrown out by default for the
+same reason (a bot's last message is almost always an unanswered notification),
+but come back with `include_bots=True`. Saved Messages is thrown out too: notes
+to yourself are not a debt.
+
+On a live account: 147 chats with the debt on you, 115 with the debt on the
+other side, the oldest one hanging for 39,455 hours (since February 2022). Out
+of 323 dialogs, 48 channels, 12 bots and Saved Messages were filtered out.
+
+### `tg_history(chat, limit=40, before_id=None, from_user=None, search=None, topic=None, saved_from=None)`
 One chat's conversation, oldest to newest. `before_id` pages deeper, `topic`
 reads a single forum thread (the id comes from `tg_topics`).
+
+`saved_from` works only with `chat="me"` and reads one subfolder of Saved
+Messages. What is forwarded to yourself Telegram stores not as a flat feed but
+laid out by original author: everything forwarded from the "Backdoor" channel
+lies in the "Backdoor" subfolder, what you wrote to yourself lies in a subfolder with your
+own name. The list of subfolders is `tg_dialogs(kind="saved")`; the name or id
+from there is what goes into `saved_from`. In other chats this cut does not
+exist, so with any `chat` other than `"me"` the parameter returns an error rather
+than emptiness. The answer additionally carries `total` — how much is saved from
+this author in total, not only on this page. The message identifiers in the
+answer are ordinary Saved Messages ids; they can be passed to `tg_message`,
+`tg_view` and `tg_forward`.
 
 ### `tg_history_batch(chats, limit=20, search=None)`
 Up to 25 chats in one call. An error in one chat does not bring down the rest —
 it comes back in that chat's row. This is the right way to read several chats; a
 loop over `tg_history` makes 25 trips where one is enough.
 
-### `tg_search(query="", chat=None, limit=30, kind=None, since=None, until=None, tag=None)`
+### `tg_search(query="", chat=None, limit=30, kind=None, since=None, until=None, tag=None, engine="server", author=None)`
 Search across the whole correspondence; with `chat`, inside one chat.
+
+`engine` chooses where to search. `server` (the default) is the ordinary
+Telegram search: it sees every chat and is always current, but it has exactly as
+many filters as the client screen does. `local` searches the local index built by
+`tg_index` (below): instant, ranked by relevance, with the match highlighted and
+with a filter by author, but only over the chats the owner has indexed by hand.
+
+There is deliberately no separate tool for local search. Two similar tools with
+different behaviour would be confused by the model more often than chosen
+correctly; one tool with an explicit switch forces a conscious choice.
+
+What only `local` can do:
+
+- `author` — whose messages these are, by a substring of the name; `author="me"`
+  is your own;
+- a slice with no query at all: `query=""` plus `author`, `since`, `until`,
+  `kind` — that is "everything from Sophia in March", not a search for a word;
+- stemming both ways: `sozvonilis` ("we had a call") finds both `sozvon` and
+  `sozvonitsya`;
+- `arend*` — search by the beginning of a word, for when the stem does not help;
+- `score` in the answer (bm25, higher is more relevant) and `match` — the piece
+  of text with the match in `**asterisks**`;
+- `total` — how many matched in all, not only how many fitted into `limit`.
+
+The `local` answer is an object, not a list: besides `messages` it carries the
+state of the index. An empty answer always explains itself — "the index is
+empty", "this chat is not in the index" or "no matches, the index holds so many
+chats". Silent emptiness is the most dangerous thing here: it makes "there was no
+such conversation" indistinguishable from "this chat is not indexed".
+
+`tag` works only with `engine="server"`: Saved Messages labels live on the
+Telegram server and never reach the index. `author` is the opposite — `local`
+only.
+
+The server, contrary to expectation, does have morphology: it finds
+`dogovorimsya` by `dogovorilis`, and `napisat` by `napishu`, which Snowball
+cannot do. Checked live, which is why `engine="server"` stayed the default. The
+local index wins on other forms (`sozvonilis` → `sozvon`) and on everything that
+is out of the server's reach in principle: filters, ranking, counters and working
+without a network.
+
+### `tg_index(action="sync", chats=None, since=None, limit=None)`
+The local full-text index of the correspondence — what
+`tg_search(engine="local")` searches. It lives in `data/index.db` (sqlite +
+FTS5, mode 600).
+
+- `action="sync"` — download and index. Incrementally: for every chat the
+  boundaries of what is already downloaded are remembered, so a repeat call costs
+  exactly the messages that appeared since last time (three chats, nothing new —
+  one second).
+- `action="status"` — what is inside: the chats, how many messages in each, over
+  which period, when they were synced, the file size and its permissions.
+- `action="drop"` — tear it down. Without `chats` — the whole file, with
+  `chats` — only the named chats (after which a `VACUUM` runs so that the text
+  leaves the disk instead of lying around in the freed pages).
+
+Nothing gets indexed by itself. The first `sync` for a chat has to name it
+explicitly; a `sync` without `chats` only refreshes what the owner has already
+set up. That is not an inconvenience but a boundary: the index puts the
+correspondence on disk in a parsable form, and a human makes that decision, not
+the agent in the middle of a task.
+
+`limit` is how many messages to pull per chat in one call (2000 by default,
+20000 maximum). It also means "dig deeper": without it and without `since` only
+fresh messages are fetched, otherwise every call would go back through the
+history to the very beginning of the correspondence. `since` (`today`, ISO,
+`-30d`) limits how far back to dig.
+
+Syncing is interruptible. The call stops itself after about a hundred seconds
+(the MCP client waits no longer than 120 for the daemon) and says
+`stopped: "budget"`, every 300 messages are committed to the database, and a
+`FloodWait` does not put the call to sleep for half an hour but ends it with the
+mark `flood_wait:Ns`. In all three cases a repeat `sync` continues from the same
+boundary — the only thing that can be lost is the last messages not yet fetched,
+never what has already landed.
+
+What goes into the index is the text, the author, the date, the chat and message
+ids and the attachment type. The files themselves are not stored: a message with
+an attachment and no caption gets `[voice]`, `[photo]`,
+`[document:contract.pdf]` as its text — that way attachments are found with
+ordinary words. The details of how this differs from reading through the API, and
+how to tear it down, are in [security.md](security.md#local-message-index).
 
 ### `tg_saved_tags()`
 Saved Messages labels and how many messages sit under each. The name from there
@@ -87,6 +231,33 @@ What the daemon's watcher caught. `since` is the lower time bound, ISO
 (`2026-08-14T09:00:00+00:00`). Every incoming message is written down, not only
 the ones that raised an alert — so it can be asked about after the fact.
 
+### `tg_actions(limit=50, since=None, method=None, chat=None)`
+The log of what the agent itself did: every writing call lies in
+`data/actions.jsonl` with the time, the account, the method, the parameters, the
+first 400 characters of the text, an `ok` flag and the error text if it did not
+go through. This is the other side of `tg_events`: there, what happened in
+Telegram; here, what was done in it on your behalf.
+
+It is needed for two things. The first is a report to the owner: "what did you
+send" is answered from the log, not from the agent's memory. The second is
+working out what happened after a failure: failed calls are recorded too, with
+their error text, so it is visible what did not go through and why.
+
+`since` understands `today`, ISO (`2026-08-17T09:00`) and an offset backwards
+(`-6h`, `-3d`) — as in `tg_activity`. `method` filters by the name of the action
+(`send`, `delete`), `chat` by where the action was aimed, as a substring of the
+value passed. Records go in ascending order of time, new ones at the end.
+
+Reading calls do not reach the log: the point of the audit is what changed, not
+that someone looked at the history. There is one exception — `tg_index`: it
+changes nothing in the account, but it puts the correspondence on disk, and the
+owner has to see that.
+
+Besides the agent's calls, [inbox filter](configuration.md#inbox-filters) hits
+land here too — they get an `auto` field with the name of the rule. So the log
+shows both what the agent did and what the automation did while nobody was
+around.
+
 ### `tg_message(chat, message_id, context=0, replies=0)`
 One message in full: the reactions, the buttons under it, how many people read
 it, plus `context` neighbouring messages before and after and `replies` answers
@@ -99,6 +270,25 @@ put it and when. Telegram does not give the by-name list everywhere: in large
 channels it is closed and only the counters remain. For your own messages there
 is also `read_at` — whether the other person has read it.
 
+If the message is a poll, a `votes` field is added: the question, the flags
+(`anonymous`, `quiz`, `multiple`, `closed`), `total_voters`, `options` with
+counters and `my_vote` — what you voted for yourself. In an open poll
+(`anonymous: false`) every option gains a `by` — **who exactly** chose it and
+when; with multiple choice one person lands in several options at once.
+
+Boundaries, checked live:
+
+- in an **anonymous** poll the by-name list does not exist for anyone, the author
+  included. Telegram rejects a request for the votes as `MESSAGE_ID_INVALID`, so
+  the core does not go into such a poll at all and writes straight into `note`
+  that only the counters exist;
+- the server returns no more than fifty voters at a time. If more people voted,
+  `voters_truncated: true` is set, and `voters_listed` says how many rows
+  actually arrived;
+- a poll that hides its results until you vote has no counters at all until you
+  vote yourself — that is not an error but a Telegram rule, and it too is
+  explained in `note`.
+
 ### `tg_drafts()`
 Every unsent draft on the account, with the chats they are attached to.
 
@@ -106,18 +296,55 @@ Every unsent draft on the account, with the chats they are attached to.
 A chat's scheduled messages. With `cancel_ids` it cancels them instead of showing
 them.
 
-### `tg_activity(since="today", until=None, limit_chats=100, kind=None, include_own=True, per_chat=0)`
+### `tg_activity(since=None, until=None, limit_chats=100, kind=None, include_own=True, per_chat=0, chat=None, limit_days=120)`
 Where the correspondence actually went on over a period. Unlike `tg_unread`, the
 chats that are already read and the ones where only you wrote land here too —
 which is why this is the right start for a digest of the day.
 
 Per chat: how many messages in all, how many incoming and outgoing, the time of
-the first and of the last, whether it is archived. `since` understands `today`
-(midnight in your local time, not in Greenwich), an ISO date and an offset of the
-form `-6h`. `per_chat` adds sample messages.
+the first and of the last, whether it is archived. `since` with no value means
+`today`, that is midnight in your local time, not in Greenwich; it also
+understands an ISO date and an offset of the form `-6h`, `-30d`. `per_chat` adds
+sample messages.
 
 It looks at the archive as well: on a live account that comes to 52 chats and
 1672 messages a day out of 320 dialogs examined.
+
+**With `chat` the axis changes.** The question is the same — "when did the
+correspondence happen" — but not by chat over a period, rather by day inside one
+chat over its whole history. This is the answer to "when did we actually talk" and
+"in which period was this discussed", and the history is not downloaded: the
+server computes the per-day breakdown. Every day carries `min_id` and `max_id` —
+with them `tg_history(before_id=...)` jumps straight into that day.
+
+`since` in this mode with no value means the whole history, not today. The
+boundaries are cut by UTC days (that is how the server groups them), and a day
+touched by a boundary even partly stays whole. `limit_days` caps the number of
+days in the answer, days go from fresh to old.
+
+About accuracy, this is worth knowing. The real Telegram calendar
+(`messages.getSearchResultsCalendar`) counts days only for a single attachment
+type: to "all messages" (`InputMessagesFilterEmpty`) the server answers
+`FILTER_NOT_SUPPORTED` — checked on Saved Messages, a one-to-one conversation, an
+ordinary group, a supergroup and a channel. Hence two modes:
+
+| Call | How it is counted | Accuracy |
+|---|---|---|
+| `tg_activity(chat=X)` | sparse message positions (`messages.getSearchResultsPositions`), up to 2000 points per history | exact if the chat holds no more than ~2000 messages; a sample otherwise |
+| `tg_activity(chat=X, kind="photo")` | that same calendar, over the attachments tab | always exact |
+
+In the exact case the answer carries `exact: true`. When there are more messages
+than points, `sampled_every` and `note` appear: the count was taken roughly every
+Nth message, so a day may be overstated by up to N messages, and a day with fewer
+messages than the step may not make the list at all. On a live chat of 11,599
+messages the step came out at 6: a day with 38 messages was shown as 41, and days
+with a single message were dropped. For "exactly how many" there is `kind`: the
+photo calendar in the same chat gave 103 days and 4678 messages — exactly as many
+as `counters.photo` in `tg_chat_info`.
+
+`kind` in this mode is not the type of dialog (there is nothing to filter, there
+is one chat) but the type of attachment: `photo`, `video`, `media`, `file`,
+`music`, `voice`, `round`, `gif`, `link`, `geo`, `pinned`, `contact`.
 
 ### `tg_export(chat=None, chats=None, limit=1000, format="json", dest=None, since=None, until=None, media=False, media_max_mb=50)`
 Export of a correspondence to a file, up to 5000 messages per chat, in
@@ -161,7 +388,8 @@ the preview card.
 
 ### `tg_resolve(link)`
 
-What is behind a link, without opening it and without joining:
+What is behind a link (or behind a phone number), without opening it and without
+joining:
 
 | Link | What it returns |
 |---|---|
@@ -169,7 +397,22 @@ What is behind a link, without opening it and without joining:
 | `t.me/+hash`, `t.me/joinchat/...` | the title of the private chat, the number of members, whether you are already in it, whether a request is required |
 | `t.me/channel/123`, `t.me/c/.../123` | the chat plus the message itself |
 | `t.me/addstickers/name` | a sticker pack |
+| `+79991234567` | the person behind the number: id, name, @username, a link to the DM, last seen |
 | any external address | marked as external — that is a job for a web tool, not for Telegram |
+
+A number is recognised only with an explicit plus (`+7...`; spaces, brackets and
+hyphens are allowed): bare digits are a chat id, not a phone. It goes through
+`contacts.resolvePhone`, that is, **no contact is created** — unlike the old way
+through `ImportContacts`, which for the same answer created an entry in the
+address book and showed your number to the person you were checking. The answer
+has `contact` — whether the person is already saved by you.
+
+If no account is visible, the tool returns an explanation rather than an error
+code. What matters is that there are two cases behind that error and Telegram
+deliberately does not distinguish them: the number may have no Telegram at all,
+or it may have "who can find me by number" turned off. There is nothing to tell
+one from the other, and promising otherwise is wrong. Search by number is also
+rate-limited — under flood control a request to wait comes back.
 
 ## Stories
 
@@ -218,6 +461,35 @@ by pressing a button or with ordinary text to the bot.
 Silence is not consent: on timeout `answered: false` comes back, and such an
 answer is read as "no permission given".
 
+### `tg_remind(text=None, when=None, chat=None, unless_reply=False, list=False, cancel=None)`
+
+A reminder to the owner in the bot after a given time. It answers "remind me in
+two hours if Lena has not replied" and "at 18:00 remind me about the invoice" —
+that is, everything `tg_wait` is not fit for: that one holds the call and lives
+600 seconds at most, while here nobody holds anything.
+
+`when` is `+2h`, `+30m`, `+3d` or an absolute `2026-08-18T09:00` (a naive time is
+taken as local), the same parsing as in `tg_schedule`. The reminder lies in
+`data/reminders.json` and survives a daemon restart; the tick runs every half
+minute, so do not expect it to the second. If the daemon was down at the
+deadline, the reminder arrives at startup — late, but not silently.
+
+`unless_reply=true` together with `chat` cancels the reminder by itself if an
+incoming message arrived from that chat (or from that person) before the
+deadline. The point is not to wake the owner where the question has already
+resolved itself. A reaction does not count as a reply: the question was asked in
+text, so text is what is waited for. Without `chat` this flag is meaningless and
+is rejected.
+
+`list=true` shows the active reminders with their ids and how long is left,
+`cancel=<id>` removes one. Creating and cancelling land in `actions.jsonl`
+(`tg_actions`): a reminder survives a restart and will wake the owner on its own,
+and that must not happen unnoticed. Showing the list is reading and does not go
+into the audit.
+
+It goes to the owner alone and only through the agent's bot; nobody else is sent
+anything when it fires.
+
 ## Devices
 
 ### `tg_sessions(terminate=None)`
@@ -244,7 +516,7 @@ Three engines, `auto` tries them in order:
 
 | Engine | When it is taken | Upside | Limitations |
 |---|---|---|---|
-| `telegram` | voice messages and video notes | instant, free, nothing is downloaded | needs Premium; cannot do music or ordinary video |
+| `telegram` | voice messages and video notes | instant, free, nothing is downloaded | needs Premium; cannot do music or ordinary video; **clears the "not listened" flag** |
 | `groq` | everything else | fast, whisper-large-v3-turbo | needs `GROQ_API_KEY`, file up to 24 MB, paid past the limits |
 | `local` | if there is no key or no network | nothing leaves the machine | the first run downloads the model (~1.6 GB), needs `uv sync --extra local-whisper` |
 
@@ -252,14 +524,58 @@ If an engine in the chain falls over, the answer still comes from the next one,
 and the `fallback_from` field shows what failed and why. `language="ru"` raises
 the accuracy a little.
 
+**Transcription by the `telegram` engine is visible to the sender.**
+`messages.TranscribeAudio` clears the `media_unread` flag on the server, that is,
+for the other person the voice message is marked as listened to although nobody
+listened to it. Checked by experiment: a voice message arrived with
+`unlistened: true`, and after transcription by the built-in engine it became
+`false`; downloading the same file does not touch the flag, which is why `groq`
+and `local` are invisible and `telegram` is not.
+
+This concerns the watcher too: with `transcribe_voice: true` it transcribes every
+incoming voice message that raised an alert, that is, private correspondence
+first of all. The behaviour was deliberately left on by default — instant text in
+the notification matters more than the flag — but it is a conscious choice, not
+an accident. It is turned off by the rule `transcribe_voice: false`.
+
+Your own state is visible in the `unlistened` field of any message read: it is
+there as long as an incoming voice message, video note or video has not been
+consumed.
+
 ### `tg_translate(to_lang, chat=None, message_ids=None, text=None)`
 Translation by Telegram itself: either of a chat's messages (up to 20 at a time)
 or of arbitrary text. The language codes are the usual ones: `ru`, `en`, `de`.
 
 ## People
 
-### `tg_chat_info(chat)`
+### `tg_chat_info(chat, counters=True, similar=False)`
 id, username, type, number of members, description.
+
+`counters` — how much of what lies in the chat: `photo`, `video`, `file`,
+`music`, `voice`, `round`, `gif`, `link`, `geo`, `pinned`. The server does the
+counting (`messages.getSearchCounters`), all the filters go in one request and
+the history is not downloaded — on a live channel that is +0.05–0.1 s to the
+answer, which is why it is on by default instead of hidden behind a flag. Zeros
+are not shown: a missing key is the zero. This is the answer to "how much is
+there to download at all" before `tg_download_many`.
+
+Calls are deliberately absent from the list: for a particular interlocutor the
+server rejects `InputMessagesFilterPhoneCalls` (`PEER_ID_NOT_SUPPORTED`) — calls
+in Telegram live in a list of their own, not inside a chat.
+
+`similar` — the channels similar to this one ("what else to subscribe to on the
+topic"), `channels.GetChannelRecommendations`. It works for channels only: a
+group, a supergroup and a person return an `error`. A subscription to the channel
+is not needed, and someone else's public one can be asked about as well. The list
+is sometimes empty — Telegram simply does not have something to offer for every
+channel.
+
+About truncation. It was checked on a Premium account, and there the full list
+arrived: 86–95 channels, with no truncation mark. It is known that without
+Premium Telegram returns only the beginning of the list, sending it as a slice
+with the full number inside; in that case `total` and `truncated` appear in the
+answer. That branch itself has not been checked on a non-Premium account — there
+was nothing here to check it on.
 
 ### `tg_participants(chat, limit=50, query=None)`
 Members with everything needed to reach them: `@username`, a direct link to the
@@ -280,6 +596,39 @@ Contacts and slices of them:
 ### `tg_common_chats(user, limit=50)`
 The groups and channels you are both in. A quick way to identify an unfamiliar
 person: where they came from and through whom.
+
+### `tg_person(user, messages=20, chats=10)`
+A dossier on a person in one call — what `tg_chat_info`, `tg_contacts`,
+`tg_common_chats`, `tg_history` and `tg_resolve` used to be pulled one after
+another for. The point is context: before writing to someone, the agent should
+know everything about them that the account knows, and not spend five answers on
+it.
+
+What is inside:
+
+| Field | What is there |
+|---|---|
+| `profile` | id, name, `@username`, a direct link to the DM, the phone if it is visible, the bio, online or when last seen |
+| `profile` (flags) | `bot`, `premium`, `verified`, `scam`, `fake`, `deleted`, `contact`, `mutual_contact`, `blocked`, `me` — the false ones are not returned at all |
+| `profile.birthday` | if Telegram gives it: `05.02.2003`, or `01.12` when the year is hidden |
+| `profile.note` | the private note about a contact — only the account owner sees it, the other person knows nothing about it |
+| `common_chats_count`, `common_chats` | how many chats you share and which exactly (`chats` of them) |
+| `top_rating` | the place in the top of interlocutors: Telegram's own rating, the same one that lifts people in search. No row means not in the top |
+| `conversation` | the last `messages` messages of the private correspondence, `total` — how many there are in all, `since` and `first_text` — what it started with |
+
+`messages=0` removes the texts but keeps the counters; `chats=0` skips the
+request for common chats.
+
+`since` is the date of the oldest **remaining** message: a cleared history shifts
+it, so it is the start of the correspondence, not of the acquaintance.
+
+**A boundary.** There is no global search of messages by author in MTProto —
+Telegram does not expose such a method. So "what he wrote" here means the private
+correspondence only. What a person wrote in a shared group is read separately and
+one chat at a time: `tg_history(chat=<group>, from_user=<him>)`.
+
+Not a person, not a dossier: for a channel or a group the tool answers with an
+error and sends you to `tg_chat_info`.
 
 ## Attachments
 
@@ -324,6 +673,16 @@ Up to 50 files at a time, the ids come from `tg_media`.
 
 Everything listed below goes through `_assert_write()` (the `TG_ALLOW_WRITE`
 switch) and `RateGuard`, and every call is written to `data/actions.jsonl`.
+
+If [write confirmation mode](configuration.md#write-confirmation-mode) is on, one
+more question to the owner in the bot stands between the call and Telegram, and
+without an "allow" answer the call returns the error "the owner did not
+confirm". The check sits in the daemon, so it works the same for every writing
+tool — including the ones described in other sections of this page: `tg_notify`,
+`tg_stories` (with `mark_read`), `tg_scheduled` (with `cancel_ids`),
+`tg_sessions` (with `terminate`), `tg_remind`, `tg_rules`. Only `tg_alert` and
+`tg_ask` are excluded: they are the question channel itself, and confirming it
+with a question would be a loop.
 
 | Tool | What it does |
 |---|---|
@@ -406,6 +765,7 @@ favourites).
 | Tool | What it does |
 |---|---|
 | `tg_admin_log(chat, limit=50, query="", admins=None)` | the log: who banned, deleted, renamed, and when |
+| `tg_invites(chat, link=None, limit=50, revoked=False)` | the chat's invite links and who came in through them |
 | `tg_bot_info(bot, lang_code="")` | the name, the "about", the description and the commands of your own bot |
 | `tg_bot_edit(bot, name, about, description, commands, lang_code)` | change them |
 | `tg_cache_clear(downloads=False)` | drop the cache of chat titles, and optionally clear the downloads |
@@ -413,6 +773,37 @@ favourites).
 The list of commands (`commands`) Telegram allows to be changed only with the
 bot's own token, so it works for this agent's bot; for the rest there is
 @BotFather.
+
+#### `tg_invites(chat, link=None, limit=50, revoked=False)`
+
+The tool is a reading one, even though it stands among the administration ones:
+it creates nothing and revokes nothing — a new link is issued by
+`tg_invite(chat, link=true)`.
+
+Without `link` — which links the chat has: the address, the title, whether it is
+permanent, the usage limit and how much of it is used, the expiry, whether a join
+request is required. The links shown are the ones created by you (Telegram
+requires naming the administrator whose links you are asking about); who else in
+this chat hands them out and how many they have is in the `admins` field.
+`revoked=true` — the same about the revoked ones.
+
+With `link` — by name, **who joined through exactly that one** and when: the
+name, the @username, a link to the DM, the date, and for links with join requests
+also who approved the request. Both the full address and the bare hash are
+accepted — `+hash` is completed to `t.me/+hash` automatically. The link has to
+belong to this chat: someone else's Telegram does not recognise, and the answer
+that comes back is "there is no such link in this chat, or it has already been
+revoked".
+
+Admin rights are required — Telegram gives these lists only to those who can
+manage invitations. Without the rights an explanation comes back rather than a
+traceback, and text just as clear comes back for an attempt to ask about the
+invitations of a private conversation, where there are none.
+
+The practical point is to tie "a person arrived" to "through which link". A
+link's usage counter counts only those who went through it themselves; the ones
+added by hand through `tg_invite(users=...)` will not be in this list — they did
+not join through a link.
 
 ## Reactions
 
@@ -486,9 +877,27 @@ A message to the owner through the agent's bot. This is the right way to
 Changes the daemon's auto-alert rules, merged over the current ones. The keys and
 the values are in [configuration.md](configuration.md#alert-rules).
 
+The same tool configures the automation the daemon runs on its own, without a
+running Claude: `digest_at` — the times of the digests in the bot
+([digest](configuration.md#scheduled-digest)), `auto` — the inbox filters
+([filters](configuration.md#inbox-filters)). They deliberately have no tools of
+their own: this is a setting of the daemon, not an action of the agent. The
+schedule and the filters are validated on save — a rule with a typo in the action
+will not be saved silently.
+
+The filter actions are a closed list: mark as read, archive, mute, put into a
+folder, forward to Saved Messages. A rule cannot write to an outside person —
+there is simply no such action.
+
+The `confirm_*` keys — [write confirmation
+mode](configuration.md#write-confirmation-mode) — do not go through this tool: an
+attempt to change them returns an error. That is the owner's restriction on the
+agent, not a setting of the agent, so it is edited by file only — as are the
+limits.
+
 ## What is deliberately missing
 
-The MTProto map (layer 227) is wider than these 70 tools, and part of it is
+The MTProto map (layer 227) is wider than these 76 tools, and part of it is
 deliberately not taken — that is a decision, not a gap:
 
 | What | Why not |
@@ -501,6 +910,9 @@ deliberately not taken — that is a decision, not a gap:
 | Calls and group calls | a WebRTC stack is needed and there is none here; signalling without media is useless |
 | An arbitrary call of any MTProto method | such a "universal" tool cancels out the whole point of the limits and the audit: anything at all passes through it, including what the other tools forbid |
 | Changing privacy, 2FA, deleting the account | irreversible operations on the account itself; their place is in the owner's hands |
+| Auto-replies in [inbox filters](configuration.md#inbox-filters) | a rule fires with no human present, and one typo in the condition would mean a message to an outsider. The filter actions are a closed list with no sending to live people in it at all: mark as read, archive, mute, into a folder, forward **to Saved Messages** |
+| A separate tool for local search, for filters and for the digest | local search is `engine="local"` in `tg_search`, while filters and the digest are a setting of the daemon through `tg_rules`. Two similar tools with different behaviour would be confused by the model more often than chosen correctly, and automation that works without a running Claude needs no tool by definition |
+| Changing `confirm_*` and `LIMITS` from MCP | these are the owner's restrictions on the agent; they are edited by file only, otherwise the agent can lift them off itself and they protect against an honest agent alone |
 
 The single exception among "operations on the account" is `tg_sessions`: seeing
 where the account is open is useful precisely to an assistant, while revoking a
@@ -515,8 +927,15 @@ scripts:
 ```bash
 uv run tg call structure '{"sample": 3}'
 uv run tg call history '{"chat": "me", "limit": 5}'
-uv run tg call media '{"chat": "Photos", "kind": "photo", "limit": 10}'
+uv run tg call pending '{"direction": "theirs", "min_age_hours": 48}'
+uv run tg call index '{"action": "status"}'
+uv run tg call actions '{"since": "-6h"}'
 ```
 
-The method names match the tool names without the `tg_` prefix, except
-`tg_unread` → `unread` and `tg_pin` → `pin`.
+The method names match the tool names without the `tg_` prefix. There are two
+exceptions: `tg_resolve` calls the method `resolve_link`, and `tg_account_use`
+has no method at all — switching the account lives in the MCP server itself,
+while in the CLI the same role is played by the `--account` flag.
+
+The account is chosen with it too:
+`uv run tg call dialogs '{"limit":5}' --account work`.

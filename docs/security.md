@@ -24,17 +24,91 @@ Three things, in decreasing order of danger:
 | Mechanism | Where | Against what |
 |---|---|---|
 | `TG_ALLOW_WRITE=0` | `core._assert_write` | any change to the account, including an accidental one |
+| `confirm_writes` | `daemon.confirm_write` | an action the agent must not decide on its own: asks the owner in the bot |
 | 60 messages per hour | `core.RateGuard` | an agent stuck in a loop |
 | 15 distinct chats per hour | same place | a mailshot to your contacts |
 | 50 deletions per hour | same place | mass erasure of correspondence |
 | a list of candidates instead of guessing | `core.resolve` | a message to the wrong person because of a similar name |
 | ignoring your own bot | `daemon.alert_reason` | an alert loop until FloodWait |
 | bot commands only from your own chat | `daemon.bot_loop` | an outsider driving the agent |
-| `actions.jsonl` | `daemon.append_action` | "who sent this" after the fact |
+| a closed list of filter actions | `config.AUTO_ACTIONS`, checked in `validate_auto` | an auto-reply to an outsider caused by a wrong rule: there is no sending to live people among the actions |
+| `confirm_*` and `LIMITS` are not editable through MCP | `daemon.set_rules`, `config.save_rules` | an agent lifting its own restriction |
+| `actions.jsonl` | `daemon.append_action`, read by `tg_actions` and `/actions` | "who sent this" after the fact |
 
 All the checks sit in the core and in the daemon, that is, below the model. The
 agent cannot talk its way around them and cannot raise its own limits through
 MCP — `LIMITS` is edited by file only.
+
+### Write confirmation
+
+`confirm_writes` in `data/rules.json` is the middle mode between "read only" and
+"anything goes": a writing call first goes to the owner as a question in the bot
+and is executed only after an explicit "allow". The setting is described in
+[configuration.md](configuration.md#write-confirmation-mode), what matters here
+is the threat model.
+
+The check sits as a wrapper around `WRITE_METHODS` in `daemon.handle_call`, that
+is, at the same level as the audit: not a single writing call slips past it, no
+matter which MCP tool it was called by. It is deliberately absent from the core
+— the core knows nothing about the bot and must not know.
+
+Silence does not count as permission: a timeout and a refusal produce a call
+error "the owner did not confirm", not a quiet success, and both outcomes end up
+in `actions.jsonl` — afterwards you can see not only what the agent sent, but
+also what it was refused. If the bot is not configured, there is no one to ask,
+and the mode forbids writing altogether; an unrecognised value of the key is
+also a refusal, not a pass-through. This setting can only be got wrong in the
+safe direction.
+
+The `confirm_*` keys are not editable through `tg_rules`: an attempt returns an
+error, and saving the alert rules does not overwrite them with the values from
+the daemon's memory. This is exactly the reason why the limits are not
+configurable through MCP — the agent must not be able to lift its own
+restriction, otherwise it only protects you from an honest agent. The allowlist
+(`confirm_whitelist`) is part of the same restriction and is protected the same
+way: otherwise it would be enough to append the desired chat to it.
+
+### Inbox filters
+
+The `auto` section in `rules.json` is the only place where something happens
+without a human and without an agent: a rule fires on an incoming message right
+inside the daemon. That is why the restriction here is not in confirmation, but
+in what can be done at all.
+
+The list of actions is closed at five items (`read`, `archive`, `mute`,
+`folder`, `save`), is checked when the rules are saved, and not one of them
+sends a message to a live person: for `save` the recipient is hardwired into the
+code — Saved Messages — and the other four send nothing at all. There are no
+auto-replies and there deliberately will not be: a rule works unsupervised, and
+the price of a typo in a condition must not include a letter to an outsider.
+
+Filter actions do not go through `confirm_writes`, and that is deliberate. A
+question on every incoming message would train the owner out of reading
+questions, whereas permission here is given once — when the rule is created.
+Everything else is in place: the actions go through the same core methods, hence
+through `_assert_write` and `RateGuard` (with `TG_ALLOW_WRITE=0` the filters do
+not work at all), and every firing lands in `actions.jsonl` with the rule name
+in the `auto` field. A failed one too, with the error text.
+
+### Audit: what the agent did
+
+`data/actions.jsonl` is the only answer to "what did it send". Every writing
+call is written there: time, account, method, parameters, the first 400
+characters of the text, whether it succeeded and the error text if not.
+Telegram's own response is not put into the log — what matters is what went out,
+not what came back. Failed calls are written by the same path, so an owner's
+refusal in confirmation mode, a limit hit and a FloodWait are visible in the log
+on a par with success.
+
+It is read in three ways: `tg_actions` from the agent (with filters by time,
+method and chat), `/actions` from your phone (the last ten) and simply by eye —
+it is jsonl. Reading calls do not go there: the point of the audit is what
+changed, not that someone looked at the history. The only exception is
+`tg_index`: indexing changes nothing in the account, but it lays the
+correspondence out on disk, and the owner should see that.
+
+The file grows without rotation on purpose, unlike `events.jsonl`: a truncated
+audit is an audit you cannot ask "and what happened in March".
 
 ### The irreversible parts of the extended set
 
@@ -52,6 +126,7 @@ people or cannot be rolled back. Their behaviour is worth knowing:
 | `tg_chat_edit` with `slowmode`/`permissions`/`forum` | changes the chat rules for all members |
 | `tg_topic_edit(closed=true)` | closes a forum topic — only admins will be able to post in it |
 | `tg_bot_edit` | the bot description is visible to everyone who opens it |
+| `tg_remind` | sends nothing to outsiders, but survives a restart and will wake the owner itself — which is why creation and cancellation go into `actions.jsonl` |
 
 All of them require `TG_ALLOW_WRITE=1`, are written to `actions.jsonl` and are
 absent from the watcher on Haiku. Sending of any kind — including polls, albums
@@ -66,6 +141,57 @@ without a password.
 Drafts (`tg_draft`) stand apart: they send nothing and spend no quota. This is
 the safest way to let the agent "write" — the text appears in Telegram, and you
 are the one who sends it.
+
+## Local message index
+
+`tg_index` puts the correspondence into `data/index.db` — sqlite with FTS5. This
+is the most sensitive thing in `data/` after the session file, and it differs
+from everything else in that here the correspondence does not fly through the
+process, but stays lying around.
+
+What exactly ends up in the file: the message text, the author's name and id,
+the date, the chat and message ids, the attachment type. The files themselves
+are never stored — all that remains of an attachment is the word `[voice]` or
+`[document:report.pdf]`. There are no keys, tokens or session data in the index.
+
+How this differs from ordinary reading through the API. `tg_history` and the
+server-side `tg_search` are ephemeral: the messages arrive in response to a call,
+live in the model context and are saved nowhere — all that is left of them on
+disk is at most a line in `actions.jsonl`, and only for writing actions. The
+index is the opposite: the text lands on disk in a parseable form and lies there
+until someone wipes it. A file you only need to copy to get that is the entire
+indexed correspondence, whole, without a password and without 2FA. Therefore:
+
+- `data/` as a whole is closed off by `.gitignore` and `.dockerignore`, the
+  directory is created with permissions 700, `index.db` itself with 600, and at
+  creation time rather than by a chmod afterwards: otherwise there is a window
+  between creation and the permission change;
+- WAL is deliberately not enabled. There is exactly one writer here — the
+  daemon — and WAL would leave an `index.db-wal` next to it with the same text
+  inside and with permissions set by umask;
+- nothing is indexed by itself. Neither the filters, nor the digest, nor the
+  watcher touch the index: the first `sync` for each chat has to be named by the
+  owner explicitly. The agent cannot pull the account onto disk "just in case",
+  because the chat has to be listed, and the call lands in `actions.jsonl`.
+
+Indexing and wiping are the only actions that do not change the account and are
+still written to the log (`AUDIT_ONLY` in `daemon.py`). They are not put through
+bot confirmation: they show nothing to outsiders and change nothing in Telegram,
+and a question before a sync that itself takes on the order of a hundred seconds
+would not fit into the call timeout.
+
+To wipe:
+
+```bash
+uv run tg call index '{"action":"drop"}'                   # the whole index
+uv run tg call index '{"action":"drop","chats":["Huts"]}'  # a single chat
+```
+
+A full wipe deletes the file rather than clearing the tables: only that way do
+both the text and the housekeeping pages leave the disk. A per-chat wipe does a
+`DELETE` followed by a `VACUUM` — without it the deleted messages would remain
+readable in the file's freed pages. Verified with `grep -a` over the binary:
+after a `drop` no words from the wiped chat remain in the file.
 
 ## Injections through chat contents
 
@@ -111,11 +237,25 @@ owner will appear in the list of viewers. That is why the flag is off by
 default, and the prompts of both agents say to set it only on an explicit
 request.
 
+There is also the opposite example — an action visible to the other party even
+though it looks like reading. `tg_transcribe(engine="telegram")` clears the
+`media_unread` flag, and the voice message is marked as listened to on the
+sender's side. Downloading the file (`groq`, `local`) does not touch the flag.
+With `transcribe_voice: true` the watcher transcribes every incoming voice
+message that triggered an alert — that is, private correspondence first and
+foremost. This is an accepted trade-off, not an oversight: the text in the
+notification matters more than the flag. If the flag matters more to you —
+`transcribe_voice: false`.
+
 `tg_ask` is the reverse channel: the agent asks the owner in the bot and waits
 for an answer by button or text. Answers are accepted only from the
 `TG_ALERT_CHAT_ID` chat; presses from any other chat are ignored. A timeout is
 treated as a refusal — silence does not count as permission, neither in the code
 nor in the prompts.
+
+The `confirm_writes` mode rests on this same channel: there the question is
+asked not by the agent but by the daemon, and not of its own will, but before
+every writing call.
 
 ## Sign-in
 

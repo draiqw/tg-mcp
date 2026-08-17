@@ -75,6 +75,33 @@ def agent_tools(path: pathlib.Path) -> set[str]:
     return set(re.findall(r"mcp__telegram__(tg_\w+)", head))
 
 
+def module_constant(module: str, name: str) -> set[str]:
+    """String elements of a top-level constant (`FOO = {...}` / `(...)`).
+
+    Through ast rather than an import: the script must remain a static parse and
+    not drag Telethon and aiohttp along for the sake of one list.
+    """
+    tree = ast.parse((ROOT / "tgagent" / module).read_text())
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            continue
+        value = node.value
+        if isinstance(value, ast.Dict):
+            return {k.value for k in value.keys if isinstance(k, ast.Constant)}
+        if isinstance(value, (ast.Set, ast.Tuple, ast.List)):
+            return {e.value for e in value.elts if isinstance(e, ast.Constant)}
+    return set()
+
+
+def arch_file_rows() -> dict[str, int]:
+    """The file table from architecture.md: path -> the claimed number of lines."""
+    text = (ROOT / "docs" / "architecture.md").read_text()
+    rows = re.findall(r"\|\s*\**`(tgagent/[\w.]+)`\**\s*\|\s*(\d+)\s*\|", text)
+    return {path: int(n) for path, n in rows}
+
+
 def main() -> int:
     tools = mcp_tools()
     disp = dispatch_methods()
@@ -94,7 +121,11 @@ def main() -> int:
 
     # the daemon's write methods must exist in the core or be methods of the daemon itself
     # These live in the daemon itself: they need the event stream and the bot channel, not Telegram.
-    daemon_own = {"status", "accounts", "events", "rules", "alert", "whoami", "wait", "ask"}
+    daemon_own = {
+        "status", "accounts", "events", "rules", "alert", "whoami", "wait", "ask",
+        # reminders need the tick and the bot channel, the action log needs the daemon's file
+        "remind", "actions",
+    }
     ghost = sorted(
         m for m in disp - daemon_own if m not in core and m.rstrip("_") not in core
     )
@@ -136,7 +167,10 @@ def main() -> int:
         "tg_chat_edit", "tg_leave", "tg_folder_edit", "tg_pin", "tg_pin_message",
         "tg_send_sticker", "tg_topic_create", "tg_topic_edit", "tg_bot_edit",
         "tg_cache_clear", "tg_account_use", "tg_rules", "tg_export",
-        "tg_sessions",
+        "tg_sessions", "tg_remind",
+        # tg_index does not touch the account, but it lays the correspondence out on
+        # disk and knows how to wipe it from there — the watcher is not entitled to such a tool
+        "tg_index",
     }
     leak = sorted(watch & write_ish)
     check(not leak, f"the watcher was given no dangerous tools: {leak or 'yes'}")
@@ -146,6 +180,69 @@ def main() -> int:
         text = (ROOT / doc).read_text()
         wrong = [n for n in re.findall(r"(\d+) tools", text) if int(n) != len(tools)]
         check(not wrong, f"{doc}: tool counter {wrong or 'correct'}")
+
+    watch_doc = (ROOT / "docs" / "mcp.md").read_text()
+    claimed = re.search(r"\|\s*`telegram-watch`\s*\|[^|]*\|\s*(\d+)", watch_doc)
+    check(
+        bool(claimed) and int(claimed.group(1)) == len(watch),
+        f"docs/mcp.md: the watcher's tool counter "
+        f"({claimed.group(1) if claimed else '?'} against {len(watch)})",
+    )
+
+    # the file table in architecture.md: both the contents and the number of lines.
+    # Drifts apart silently with any edit to the code, and reads as fact.
+    listed = arch_file_rows()
+    modules = {
+        f"tgagent/{p.name}": len(p.read_text().splitlines())
+        for p in sorted((ROOT / "tgagent").glob("*.py"))
+        if p.name != "__init__.py"
+    }
+    missing = sorted(set(modules) - set(listed))
+    check(not missing, f"architecture.md: modules with no row in the table: {missing or 'none'}")
+    stale = sorted(f"{f} {listed[f]}≠{modules[f]}" for f in listed if f in modules and listed[f] != modules[f])
+    check(not stale, f"architecture.md: the line counts have drifted: {stale or 'none'}")
+
+
+    # the rules from config.DEFAULT_RULES must be described, otherwise a new key
+    # exists only in the code and nobody will be able to configure it
+    conf_doc = (ROOT / "docs" / "configuration.md").read_text()
+    rules_keys = module_constant("config.py", "DEFAULT_RULES")
+    undoc_rules = sorted(k for k in rules_keys if f"`{k}`" not in conf_doc)
+    check(not undoc_rules,
+          f"rules with no description in configuration.md: {undoc_rules or 'none'}")
+
+    confirm_keys = module_constant("config.py", "CONFIRM_KEYS")
+    check(
+        confirm_keys <= rules_keys,
+        f"CONFIRM_KEYS with no default value: {sorted(confirm_keys - rules_keys) or 'none'}",
+    )
+
+    auto_actions = module_constant("config.py", "AUTO_ACTIONS")
+    undoc_auto = sorted(a for a in auto_actions if f"`{a}`" not in conf_doc)
+    check(not undoc_auto, f"filter actions with no description: {undoc_auto or 'none'}")
+
+    # write confirmation must not ask about a method that does not write,
+    # and must not let a writing method slip past the audit
+    write_methods = module_constant("daemon.py", "WRITE_METHODS")
+    outbound = module_constant("daemon.py", "CONFIRM_OUTBOUND")
+    check(
+        outbound <= write_methods,
+        f"CONFIRM_OUTBOUND entries that do not write: {sorted(outbound - write_methods) or 'none'}",
+    )
+    audit_only = module_constant("daemon.py", "AUDIT_ONLY")
+    ghost_write = sorted((write_methods | audit_only) - disp)
+    check(not ghost_write,
+          f"methods in the audit that dispatch does not have: {ghost_write or 'none'}")
+
+    silent = sorted(
+        write_methods - outbound - module_constant("daemon.py", "CONFIRM_EXEMPT")
+        - set(module_constant("daemon.py", "CONFIRM_CONDITIONAL"))
+    )
+    undoc_silent = [m for m in silent if f"`{m}`" not in conf_doc]
+    check(
+        not undoc_silent,
+        f"the ones silent in outgoing mode are not described: {undoc_silent or 'none'}",
+    )
 
     for line in notes:
         print(line)

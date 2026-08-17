@@ -44,11 +44,19 @@ claude mcp add telegram -- docker exec -i tgagent tg-mcp
 | | |
 |---|---|
 | Image | code and dependencies, nothing else |
-| `./data` → `/data` | session, `rules.json`, `events.jsonl`, `actions.jsonl`, downloads |
+| `./data` → `/data` | session, `rules.json`, `events.jsonl`, `actions.jsonl`, `reminders.json`, `digest.json`, `index.db`, downloads |
 | `.env` | read by `docker compose` and passed as environment variables; not copied into the image |
 
 `TG_DATA_DIR=/data` is baked into the image, so the same code works both from a checkout
-and in the container.
+and in the container. One volume holds all state — no separate mounts for reminders, the
+digest and the index are needed, they sit in the same directory. The full list of files is
+in [architecture.md](architecture.md#state-on-disk).
+
+The newer features added no environment variables: the digest schedule (`digest_at`), inbox
+filters (`auto`) and the write confirmation mode (`confirm_*`) live in `data/rules.json`,
+that is on the volume, not in `.env`. So `docker compose restart` picks them up along with
+the rest of the state, and editing `confirm_*` takes effect immediately — the daemon
+re-reads those keys from disk on every writing call.
 
 ## Permissions
 
@@ -113,7 +121,15 @@ every rebuild: `- ./data/models:/root/.cache/huggingface`.
 
 The only thing to copy is `./data` — and treat the copy like the account password:
 `session.session` grants sign-in without a password and without 2FA. Logs are rotated
-(json-file, 10 MB × 3), `events.jsonl` at 20 MB inside the agent itself.
+(json-file, 10 MB × 3), `events.jsonl` at 20 MB inside the agent itself; `actions.jsonl` is
+deliberately not rotated, it is an audit trail.
+
+If the owner has set up the local index (`tg_index`), an `index.db` appears on the volume —
+the text of the indexed conversations in a parseable form. In sensitivity it comes right
+after the session file, and backing up the volume means backing up the conversations. If you
+do not need it, drop it with
+`docker compose exec tgagent tg call index '{"action":"drop"}'`,
+details in [security.md](security.md#local-message-index).
 
 To revoke access if the session leaked:
 

@@ -23,7 +23,10 @@ ACTIONS_LOG = DATA / "actions.jsonl"
 DAEMON_LOG = DATA / "daemon.log"
 PID_FILE = DATA / "daemon.pid"
 RULES_FILE = DATA / "rules.json"
+REMINDERS_FILE = DATA / "reminders.json"
+DIGEST_FILE = DATA / "digest.json"
 DOWNLOADS = DATA / "downloads"
+INDEX_DB = DATA / "index.db"     # local search index, see tgagent/index.py
 
 DEFAULT_RULES = {
     "enabled": True,
@@ -37,7 +40,101 @@ DEFAULT_RULES = {
     "alert_on_reaction": False,     # reactions to your messages: always in the event log, in the alert — on demand
     "min_interval_sec": 3,          # per-chat alert throttle
     "quiet_hours": None,            # e.g. [23, 8] -> no alerts 23:00..08:00
+    # Digest on a schedule: ["09:00", "20:00"] in local time. An empty list means
+    # off. The daemon counts it itself, so it works even when Claude is not running.
+    "digest_at": [],
+    # Inbox filters, mail-style: condition -> a safe, reversible action.
+    # No action of them writes to living people — see AUTO_ACTIONS.
+    "auto": [],
+    # A middle write mode between TG_ALLOW_WRITE=0 and 1: every writing action
+    # asks the owner in the bot. Off by default, so that the behaviour of already
+    # configured installations does not change with an update.
+    "confirm_writes": "off",        # off | outgoing | all
+    "confirm_whitelist": ["me"],    # chats not to ask about
+    "confirm_timeout_sec": 90,      # how long to wait for an answer; silence = refusal
 }
+
+# Keys of the confirmation mode. They live in the same file as the alert rules, but
+# are edited by hand only: this is the owner's restriction, not an agent setting.
+CONFIRM_KEYS = ("confirm_writes", "confirm_whitelist", "confirm_timeout_sec")
+
+# What the inbox filter can do. The list is closed and deliberately short: only
+# what is reversible and invisible to outsiders gets in. There are no autoreplies
+# and no sending to living people here, and there must not be — one bad rule must
+# not end in a message to a stranger.
+AUTO_ACTIONS = ("read", "archive", "mute", "folder", "save")
+AUTO_TYPES = ("private", "group", "channel", "bot")
+AUTO_CONDITIONS = ("chat", "from", "keyword", "type")
+
+
+def as_list(value: object) -> list:
+    """One value or a list — everywhere a rule may be given either."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    return [value]
+
+
+def parse_digest_times(value: object) -> list[tuple[int, int]]:
+    """["09:00", "20:00"] -> [(9, 0), (20, 0)], ascending. Garbage is an error.
+
+    The parsing is shared by the daemon and by the check on save: a schedule that
+    silently did not fire is worse than a missing one.
+    """
+    out: list[tuple[int, int]] = []
+    for raw in as_list(value):
+        text = str(raw).strip()
+        if not text:
+            continue
+        parts = text.replace(".", ":").split(":")
+        if len(parts) != 2 or not all(p.strip().isdigit() for p in parts):
+            raise ValueError(f"digest_at: {raw!r} — expected the format HH:MM")
+        hour, minute = int(parts[0]), int(parts[1])
+        if not (0 <= hour < 24 and 0 <= minute < 60):
+            raise ValueError(f"digest_at: {raw!r} — there is no such time")
+        out.append((hour, minute))
+    return sorted(set(out))
+
+
+def validate_auto(value: object) -> list[dict]:
+    """Check the auto section and turn action into a list.
+
+    The check is strict and happens on input, not on firing: a rule with a typo in
+    the action would otherwise simply do nothing, and there would be nothing to
+    notice it by.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("auto: expected a list of rules")
+    out: list[dict] = []
+    for i, raw in enumerate(value, 1):
+        if not isinstance(raw, dict):
+            raise ValueError(f"auto[{i}]: a rule is an object, not {type(raw).__name__}")
+        rule = dict(raw)
+        actions = [str(a).strip().lower() for a in as_list(rule.get("action"))]
+        unknown = [a for a in actions if a not in AUTO_ACTIONS]
+        if not actions or unknown:
+            raise ValueError(
+                f"auto[{i}]: action — one or several of {', '.join(AUTO_ACTIONS)}"
+                + (f"; do not know: {', '.join(unknown)}" if unknown else "")
+            )
+        if "folder" in actions and not str(rule.get("folder") or "").strip():
+            raise ValueError(f"auto[{i}]: the folder action needs a folder in the folder field")
+        kind = rule.get("type")
+        if kind is not None and str(kind).strip().lower() not in AUTO_TYPES:
+            raise ValueError(f"auto[{i}]: type — one of {', '.join(AUTO_TYPES)}")
+        if not any(rule.get(k) for k in AUTO_CONDITIONS):
+            raise ValueError(
+                f"auto[{i}]: at least one condition is needed ({', '.join(AUTO_CONDITIONS)}) — "
+                "a rule without conditions would fire on every incoming message"
+            )
+        rule["action"] = actions
+        out.append(rule)
+    return out
+
+
 # Write-side safety limits (per rolling hour unless stated otherwise).
 LIMITS = {
     "max_sends_per_hour": 60,
@@ -68,6 +165,17 @@ def session_path(account: str | None = None) -> Path:
     """Session file for a label: main → data/session, work → data/session-work."""
     label = normalize_account(account)
     return SESSION if label == MAIN_ACCOUNT else DATA / f"session-{label}"
+
+
+def index_path(account: str | None = None) -> Path:
+    """Conversation index for a label: main → data/index.db, work → data/index-work.db.
+
+    One file per account, same as with the session: mixing the conversations of
+    different accounts in one index is not allowed — wiping one without touching
+    the other would become impossible.
+    """
+    label = normalize_account(account)
+    return INDEX_DB if label == MAIN_ACCOUNT else DATA / f"index-{label}.db"
 
 
 def list_accounts() -> list[str]:
@@ -136,23 +244,45 @@ def allow_write() -> bool:
     return (env("TG_ALLOW_WRITE", "1") or "1").lower() not in ("0", "false", "no")
 
 
-def load_rules() -> dict:
+def _stored_rules() -> dict:
     if RULES_FILE.exists():
         try:
-            stored = json.loads(RULES_FILE.read_text())
+            return json.loads(RULES_FILE.read_text())
         except json.JSONDecodeError:
-            stored = {}
-    else:
-        stored = {}
+            return {}
+    return {}
+
+
+def load_rules() -> dict:
     rules = dict(DEFAULT_RULES)
-    rules.update(stored)
+    rules.update(_stored_rules())
     return rules
+
+
+def load_confirm() -> dict:
+    """Write confirmation settings — always fresh from disk.
+
+    Separate from load_rules, because they are read on every writing call: editing
+    the file by hand must take effect at once, not after a daemon restart.
+    """
+    stored = _stored_rules()
+    return {k: stored.get(k, DEFAULT_RULES[k]) for k in CONFIRM_KEYS}
 
 
 def save_rules(rules: dict) -> dict:
     ensure_dirs()
     merged = dict(DEFAULT_RULES)
     merged.update(rules)
+    # Whatever is being saved — the alert rules from tg_rules, /watch or /mute —
+    # the confirmation mode is taken from disk, not from the dictionary passed in.
+    # Otherwise the agent would lift the restriction off itself by accident: it
+    # would be enough to write the rules over a stale copy in the daemon's memory.
+    merged.update(load_confirm())
+    # The schedule and the filters are checked before writing: a wrong schedule
+    # would stay silent, and a wrong filter would silently not fire — there is
+    # nothing to notice either case by.
+    parse_digest_times(merged.get("digest_at"))
+    merged["auto"] = validate_auto(merged.get("auto"))
     RULES_FILE.write_text(json.dumps(merged, ensure_ascii=False, indent=2))
     RULES_FILE.chmod(0o600)
     return merged

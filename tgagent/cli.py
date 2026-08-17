@@ -424,11 +424,14 @@ def cmd_status(args) -> int:
     return 0
 
 
-async def _rpc(method: str, account: str | None = None, **params):
+async def _rpc(method: str, params: dict | None = None, account: str | None = None):
+    # Parameters go as a dict, not as **kwargs: the tools have a `method`
+    # parameter (`tg_actions`), and on **kwargs such a call would fail with
+    # "multiple values".
     import aiohttp
 
     connector = aiohttp.UnixConnector(path=str(config.SOCKET))
-    payload = {"method": method, "params": params, "account": account}
+    payload = {"method": method, "params": params or {}, "account": account}
     async with aiohttp.ClientSession(connector=connector) as sess:
         async with sess.post("http://tg/call", json=payload) as r:
             data = await r.json()
@@ -440,7 +443,7 @@ async def _rpc(method: str, account: str | None = None, **params):
 def cmd_call(args) -> int:
     params = json.loads(args.params) if args.params else {}
     try:
-        result = asyncio.run(_rpc(args.method, account=getattr(args, "account", None), **params))
+        result = asyncio.run(_rpc(args.method, params, account=getattr(args, "account", None)))
         _p(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except Exception as exc:

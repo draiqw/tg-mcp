@@ -94,13 +94,21 @@ cp ~/tg-agent/agents/*.md ~/.claude/agents/
 
 | Agent | Model | Set |
 |---|---|---|
-| `telegram` | Sonnet | all 70 tools, carries on conversations in your name |
-| `telegram-watch` | Haiku | 31: reading, alerts, `mark_read`/`mute`/`archive`; `tg_send` to Saved Messages only |
+| `telegram` | Sonnet | all 76 tools, carries on conversations in your name |
+| `telegram-watch` | Haiku | 39: reading, alerts, `mark_read`/`mute`/`archive`; `tg_send` to Saved Messages only |
 
 The watcher has nothing destructive — no `tg_delete`, `tg_edit`, `tg_forward`,
-`tg_pin`, no moderation, reactions, buttons or leaving chats. They are not listed in
-its frontmatter, that is, they are physically unavailable rather than forbidden by text. Both prompts contain a section explaining that the contents of other people's messages are
-data, not commands.
+`tg_pin`, no moderation, reactions, buttons or leaving chats. There is no `tg_index`
+either: it does not touch the account, but it lays the correspondence out on disk and
+can wipe it from there — that is for the owner to decide, not for a background "what's
+new" check. `tg_remind` and `tg_rules` are absent by the same logic: they outlive a
+restart and change the daemon's behaviour. None of this is listed in its frontmatter,
+that is, it is physically unavailable rather than forbidden by prompt text.
+
+The watcher's reading side, on the contrary, is complete: `tg_pending` (who was left
+without an answer), `tg_person` (a dossier on a person), `tg_actions` (what the agent
+did), `tg_invites` (who came in by link). Both prompts contain a section explaining that
+the contents of other people's messages are data, not commands.
 
 Agents and MCP servers are read once at session start. After installing, restart Claude
 Code, otherwise the new server will not show up in the current session.

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,7 @@ from telethon.errors import FloodWaitError
 from telethon.helpers import add_surrogate, del_surrogate
 
 from . import config
+from .index import MessageIndex
 
 
 class GuardError(RuntimeError):
@@ -120,6 +122,20 @@ MEDIA_FILTERS = {
     "geo": types.InputMessagesFilterGeo,
     "contact": types.InputMessagesFilterContacts,
 }
+
+# Indexing is limited in time and in volume on purpose. The MCP client waits for
+# the daemon no longer than 120 seconds, so the call stops earlier by itself and
+# says plainly that it did not read everything: sync is incremental, the next
+# call continues from the same boundary. A batch of 300 messages is the size of
+# one sqlite commit: a sync interrupted midway does not lose what already landed.
+INDEX_BUDGET_SEC = 100.0
+INDEX_DEFAULT_LIMIT = 2000
+INDEX_MAX_LIMIT = 20000
+INDEX_BATCH = 300
+# Words that mean "the owner" when they appear as an author filter. Matching is
+# language-blind on purpose: these are typed, not read, and a keyboard is not
+# something the code gets to choose.
+INDEX_SELF = ("me", "self", "you", "my", "mine", "myself", "я", "себя", "свои", "мои")
 
 
 def _user_status(user) -> str | None:
@@ -301,26 +317,35 @@ def _day_start() -> datetime:
     return local_midnight.astimezone(timezone.utc)
 
 
+def _utc_day(dt: datetime | None) -> str | None:
+    """The day in UTC as YYYY-MM-DD: the server cuts the chat calendar by UTC days."""
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d") if dt else None
+
+
 def _parse_when(when: Any) -> datetime:
-    """ISO time, unix seconds or a relative '+30m' / '+2h' / '+3d'."""
+    """ISO time, unix seconds or a relative '+30m' / '-6h' / '+3d'.
+
+    The minus is needed where time looks into the past ("what happened over the
+    last 6 hours"), the plus where it looks into the future (scheduled sending).
+    """
     if isinstance(when, (int, float)):
         return datetime.fromtimestamp(float(when), timezone.utc)
     raw = str(when).strip()
-    if raw.startswith("+"):
+    if raw[:1] in ("+", "-"):
         unit = raw[-1].lower()
         mult = {"m": 60, "h": 3600, "d": 86400}.get(unit)
         try:
-            amount = float(raw[1:-1])
+            amount = float(raw[:-1])
         except ValueError:
             mult = None
         if not mult:
-            raise ValueError("Relative time is written as +30m, +2h, +3d")
+            raise ValueError("Relative time is written as +30m, -6h, +3d")
         return datetime.now(timezone.utc) + timedelta(seconds=amount * mult)
     try:
         dt = datetime.fromisoformat(raw)
     except ValueError as exc:
         raise ValueError(
-            f"Could not read the time {when!r}: need ISO (2026-08-17T09:00) or +2h"
+            f"Could not read the time {when!r}: need ISO (2026-08-17T09:00), +2h or -6h"
         ) from exc
     # A naive time is read as local — a person writes "at 9 am" about themselves.
     return dt if dt.tzinfo else dt.astimezone()
@@ -436,6 +461,11 @@ class TelegramService:
             "media": _media_kind(msg),
             "mentioned": bool(msg.mentioned),
             "edited": _iso(msg.edit_date),
+            # media_unread is "I have not listened to / watched this yet". The
+            # sender sees the flag too: while it stands, the voice message is
+            # marked unplayed on their side. Only messages.readMessageContents
+            # clears it.
+            "unlistened": bool(getattr(msg, "media_unread", False)) and not msg.out,
         }
         if chat_name:
             out["chat"] = chat_name
@@ -512,8 +542,13 @@ class TelegramService:
 
         kind="inactive" is a separate slice: groups and channels where nothing
         has happened for a long time. That is what Telegram itself offers when
-        cleaning up subscriptions.
+        cleaning up subscriptions. kind="saved" is the sub-folders of Saved
+        Messages: Telegram groups forwards by their original author, and that is
+        a separate list, not the usual dialogs.
         """
+        if kind == "saved":
+            return await self.saved_dialogs(limit=limit, query=query)
+
         if kind == "inactive":
             res = await self.client(functions.channels.GetInactiveChannelsRequest())
             rows = []
@@ -667,6 +702,84 @@ class TelegramService:
             )
         return out
 
+    PENDING_DIRECTIONS = ("theirs", "mine", "both")
+
+    async def pending(
+        self,
+        limit: int = 30,
+        direction: str = "theirs",
+        min_age_hours: float = 0,
+        kind: str | None = None,
+        archived: bool | None = None,
+        include_bots: bool = False,
+    ) -> list[dict]:
+        """Chats where the conversation broke off: whom I did not answer and who
+        did not answer me.
+
+        The difference from unread_summary is fundamental: unread stops being
+        unread the moment the chat is opened — while the debt of an answer does
+        not go anywhere. What is looked at here is not the unread counter but the
+        `out` flag of the last message.
+        """
+        if direction not in self.PENDING_DIRECTIONS:
+            raise ValueError(f"direction: {', '.join(self.PENDING_DIRECTIONS)}")
+        now = datetime.now(timezone.utc)
+        me_id = getattr(self.me, "id", None)
+        rows: list[dict] = []
+        async for d in self.client.iter_dialogs(limit=1000, archived=archived):
+            # Telethon mixes pinned ones in regardless of the folder — as in dialogs().
+            if archived is not None and bool(d.archived) != bool(archived):
+                continue
+            msg = d.message
+            if msg is None or d.date is None:
+                continue
+            if d.id == me_id:
+                continue          # Saved Messages: notes to self, no debts there
+            row_kind = self.dialog_kind(d)
+            if kind:
+                if row_kind != kind:
+                    continue
+            else:
+                # In a broadcast channel the last message is incoming by
+                # definition, so without this filter the output turns into a feed
+                # of subscriptions.
+                if row_kind == "channel":
+                    continue
+                if row_kind == "bot" and not include_bots:
+                    continue
+            out = bool(msg.out)
+            row_direction = "mine" if out else "theirs"
+            if direction != "both" and row_direction != direction:
+                continue
+            age = (now - d.date).total_seconds() / 3600
+            if age < min_age_hours:
+                continue
+            ent = d.entity
+            username = getattr(ent, "username", None)
+            sender = getattr(msg, "sender", None)
+            rows.append(
+                {
+                    "id": d.id,
+                    "name": d.name,
+                    "type": row_kind,
+                    "direction": row_direction,
+                    "age_hours": round(age, 1),
+                    "last": _iso(d.date),
+                    "last_from": "you" if out else (entity_name(sender) if sender else d.name),
+                    "last_text": (msg.message or _media_kind(msg) or "")[:160],
+                    "message_id": msg.id,
+                    "unread": d.unread_count,
+                    "read": not d.unread_count,
+                    "archived": bool(d.archived),
+                    "username": username,
+                    "link": dm_link(ent)
+                    if d.is_user
+                    else (f"https://t.me/{username}" if username else None),
+                }
+            )
+        rows.sort(key=lambda r: r["age_hours"], reverse=True)
+        return rows[:limit]
+
     async def history(
         self,
         chat: Any,
@@ -675,8 +788,16 @@ class TelegramService:
         from_user: Any = None,
         search: str | None = None,
         topic: int | None = None,
+        saved_from: Any = None,
     ) -> dict:
         ent = await self.resolve(chat)
+        if saved_from is not None:
+            # A sub-folder of Saved Messages: only for chat="me", in other chats
+            # this slice does not exist — there are no original authors of
+            # forwards there.
+            if ent != "me":
+                raise ValueError('saved_from works only with chat="me" (Saved Messages)')
+            return await self.saved_history(saved_from, limit=limit, before_id=before_id)
         name = entity_name(await self.client.get_entity(ent)) if ent != "me" else "Saved Messages"
         kwargs: dict[str, Any] = {"limit": limit}
         if before_id:
@@ -689,6 +810,113 @@ class TelegramService:
             kwargs["reply_to"] = int(topic)   # a forum topic is read as a thread
         msgs = [self.message_dict(m) async for m in self.client.iter_messages(ent, **kwargs)]
         return {"chat": name, "messages": list(reversed(msgs))}
+
+    async def saved_dialogs(self, limit: int = 50, query: str | None = None) -> list[dict]:
+        """Sub-folders of Saved Messages: forwards grouped by original author.
+
+        What you wrote to yourself lies in a sub-folder under your own name —
+        Telegram treats Saved Messages as the same kind of dialog as the rest.
+        """
+        res = await self.client(
+            functions.messages.GetSavedDialogsRequest(
+                offset_date=None,
+                offset_id=0,
+                offset_peer=types.InputPeerEmpty(),
+                # with a filter we look wider, otherwise the sub-folder we are
+                # after ends up beyond the limit — the ordinary dialog list
+                # behaves the same way
+                limit=200 if query else limit,
+                hash=0,
+            )
+        )
+        ents = {
+            utils.get_peer_id(e): e
+            for e in list(getattr(res, "users", [])) + list(getattr(res, "chats", []))
+        }
+        msgs = {m.id: m for m in getattr(res, "messages", [])}
+        rows: list[dict] = []
+        for d in getattr(res, "dialogs", []):
+            pid = utils.get_peer_id(d.peer)
+            ent = ents.get(pid)
+            top = msgs.get(d.top_message)
+            name = entity_name(ent) if ent is not None else str(pid)
+            if query and query.lower() not in name.lower():
+                continue
+            rows.append(
+                {
+                    "id": pid,
+                    "name": name,
+                    "type": self.dialog_kind_of(ent) if ent is not None else "user",
+                    "username": getattr(ent, "username", None),
+                    "pinned": bool(d.pinned),
+                    "messages": await self._saved_count(pid),
+                    "last": _iso(getattr(top, "date", None)),
+                    "last_text": ((getattr(top, "message", "") or _media_kind(top) or "")[:160])
+                    if top is not None
+                    else "",
+                }
+            )
+            if len(rows) >= limit:
+                break
+        return rows
+
+    async def _saved_count(self, peer: Any) -> int | None:
+        """How many messages a sub-folder holds. A separate request: in the dialog
+        list Telegram sends no counter, only the last message."""
+        try:
+            res = await self.client(
+                functions.messages.GetSavedHistoryRequest(
+                    peer=await self.client.get_input_entity(peer),
+                    offset_id=0,
+                    offset_date=None,
+                    add_offset=0,
+                    limit=1,
+                    max_id=0,
+                    min_id=0,
+                    hash=0,
+                )
+            )
+        except Exception:
+            return None
+        return getattr(res, "count", None) or len(getattr(res, "messages", []))
+
+    async def saved_history(
+        self, saved_from: Any, limit: int = 40, before_id: int | None = None
+    ) -> dict:
+        """The messages of a single Saved Messages sub-folder."""
+        ent = await self.resolve(saved_from)
+        peer = await self.client.get_input_entity(ent)
+        res = await self.client(
+            functions.messages.GetSavedHistoryRequest(
+                peer=peer,
+                offset_id=int(before_id or 0),
+                offset_date=None,
+                add_offset=0,
+                limit=limit,
+                max_id=0,
+                min_id=0,
+                hash=0,
+            )
+        )
+        # Raw messages from the answer know neither the client nor the sender,
+        # so we finish them off the same way iter_messages does.
+        ents = {
+            utils.get_peer_id(e): e
+            for e in list(getattr(res, "users", [])) + list(getattr(res, "chats", []))
+        }
+        msgs = []
+        for m in getattr(res, "messages", []):
+            try:
+                m._finish_init(self.client, ents, None)
+            except Exception:
+                pass
+            msgs.append(self.message_dict(m))
+        return {
+            "chat": "Saved Messages",
+            "saved_from": entity_name(await self.client.get_entity(ent)),
+            "total": getattr(res, "count", None) or len(msgs),
+            "messages": list(reversed(msgs)),
+        }
 
     async def saved_tags(self) -> list[dict]:
         """Saved Messages tags — the very labels that mark up saved messages."""
@@ -714,13 +942,34 @@ class TelegramService:
         since: str | None = None,
         until: str | None = None,
         tag: str | None = None,
-    ) -> list[dict]:
+        engine: str = "server",
+        author: str | None = None,
+    ) -> list[dict] | dict:
         """Search through the conversation: across all chats or one, with filters.
 
         kind is the attachment type (the same tabs as in tg_media), since/until
         are ISO dates, tag is a Saved Messages label (`chat="me"`), as in
         Telegram itself.
+
+        engine="local" searches the local index (`index()`): with morphology, an
+        author filter and ranking — the server has neither. There is no separate
+        tool for this on purpose: two similar searches with different behaviour
+        the model would confuse more often than it would pick the right one.
         """
+        if engine not in ("server", "local"):
+            raise ValueError(
+                'engine: "server" (Telegram search) or "local" (the index on disk)'
+            )
+        if engine == "local":
+            return await self._search_local(
+                query=query, chat=chat, limit=limit, kind=kind,
+                since=since, until=until, author=author, tag=tag,
+            )
+        if author:
+            raise ValueError(
+                'author works only with engine="local": the Telegram search has no '
+                "author filter. Either engine=\"local\" or history(from_user=...)"
+            )
         ent = await self.resolve(chat) if chat else None
         kwargs: dict[str, Any] = {"search": query, "limit": limit}
         if kind:
@@ -781,6 +1030,68 @@ class TelegramService:
             rows.append(self.message_dict(m, chat_name))
         return rows
 
+    async def _search_local(
+        self, query: str, chat: Any, limit: int, kind: str | None,
+        since: str | None, until: str | None, author: str | None,
+        tag: str | None,
+    ) -> dict:
+        """Search over the local index. An empty answer must explain itself."""
+        if tag:
+            raise ValueError(
+                "Saved Messages labels live on the Telegram server, they never get "
+                'into the index: search with engine="server"'
+            )
+        store = self._index_store()
+        chat_ids = None
+        asked_chat = None
+        if chat:
+            chat_id, asked_chat, _, _ = await self._index_target(chat)
+            chat_ids = [chat_id]
+        mine = None
+        if author and str(author).strip().lower() in INDEX_SELF:
+            mine, author = True, None
+
+        def stamp(value: str | None) -> int | None:
+            if not value:
+                return None
+            dt = (
+                _day_start() if str(value).lower() in ("today", "сегодня")
+                else _parse_when(value)
+            )
+            return int(dt.timestamp())
+
+        res = store.search(
+            query=query, chat_ids=chat_ids, author=author, mine=mine,
+            since_ts=stamp(since), until_ts=stamp(until), kind=kind,
+            limit=max(1, min(int(limit), 200)),
+        )
+        res = {"engine": "local", "query": query} | res
+        if not res["messages"]:
+            # Silent emptiness here is the worst answer of all: it is unclear
+            # whether there was no such conversation or the chat in question is
+            # simply not indexed.
+            state = store.status()
+            known = {c["chat_id"] for c in state["chats"]}
+            if not state["exists"] or not known:
+                res["note"] = (
+                    "the local index is empty — not a single chat is indexed. "
+                    'First index(action="sync", chats=[...]), then this search. '
+                    "Right now the same thing is searchable with engine=\"server\"."
+                )
+            elif chat_ids and not known & set(chat_ids):
+                res["note"] = (
+                    f"chat {asked_chat!r} is not listed in the index, which is why the "
+                    "answer is empty rather than \"nothing was there\". Index it: "
+                    f'index(action="sync", chats=["{asked_chat}"])'
+                )
+            else:
+                res["note"] = (
+                    f"no matches. The index holds {state['messages']} messages from "
+                    f"{len(known)} chats — index(action=\"status\") will show which "
+                    "ones; the chat you need may simply not be among them."
+                )
+        return res
+
     async def mentions(self, limit: int = 20, kind: str = "mentions") -> list[dict]:
         """kind=mentions is where you were called, kind=reactions is what was
         reacted to."""
@@ -822,7 +1133,9 @@ class TelegramService:
                 break
         return rows[:limit]
 
-    async def chat_info(self, chat: Any) -> dict:
+    async def chat_info(
+        self, chat: Any, counters: bool = True, similar: bool = False
+    ) -> dict:
         ent = await self.client.get_entity(await self.resolve(chat))
         info = {
             "id": utils.get_peer_id(ent),
@@ -839,7 +1152,83 @@ class TelegramService:
             info["about"] = full.full_user.about
         except Exception:
             pass
+        if counters:
+            info["counters"] = await self._search_counters(ent) or None
+        if similar:
+            info["similar"] = await self._similar_channels(ent)
         return {k: v for k, v in info.items() if v is not None}
+
+    # The "Media" tabs in the client. All filters go in one request — the server
+    # counts them in one go, so this is one trip to the server, not ten.
+    # InputMessagesFilterPhoneCalls is not here: for a particular peer the server
+    # answers it with PEER_ID_NOT_SUPPORTED, calls live in a separate list rather
+    # than inside a chat.
+    COUNTER_FILTERS = {
+        "photo": types.InputMessagesFilterPhotos,
+        "video": types.InputMessagesFilterVideo,
+        "file": types.InputMessagesFilterDocument,
+        "music": types.InputMessagesFilterMusic,
+        "voice": types.InputMessagesFilterVoice,
+        "round": types.InputMessagesFilterRoundVideo,
+        "gif": types.InputMessagesFilterGif,
+        "link": types.InputMessagesFilterUrl,
+        "geo": types.InputMessagesFilterGeo,
+        "pinned": types.InputMessagesFilterPinned,
+    }
+
+    async def _search_counters(self, ent) -> dict:
+        """How many photos, videos, files and the rest a chat holds — without
+        downloading them."""
+        filters = [cls() for cls in self.COUNTER_FILTERS.values()]
+        try:
+            res = await self.client(
+                functions.messages.GetSearchCountersRequest(peer=ent, filters=filters)
+            )
+        except Exception as exc:
+            return {"error": str(exc)}
+        by_filter = {type(c.filter).__name__: c for c in res}
+        out: dict[str, Any] = {}
+        for name, cls in self.COUNTER_FILTERS.items():
+            c = by_filter.get(cls.__name__)
+            if c is None:
+                continue
+            if not c.count:
+                continue  # zeros only clutter the output, a missing key = zero
+            # inexact — the server itself admits the number is approximate.
+            out[name] = c.count if not c.inexact else f"~{c.count}"
+        return out
+
+    async def _similar_channels(self, ent) -> dict:
+        """Channels similar to this one — "what else to follow on the subject"."""
+        if not isinstance(ent, types.Channel) or getattr(ent, "megagroup", False):
+            return {"error": "only channels have similar ones"}
+        try:
+            res = await self.client(
+                functions.channels.GetChannelRecommendationsRequest(channel=ent)
+            )
+        except Exception as exc:
+            return {"error": str(exc)}
+        items = [
+            {
+                "id": utils.get_peer_id(ch),
+                "name": entity_name(ch),
+                "username": f"@{ch.username}" if getattr(ch, "username", None) else None,
+                "participants": getattr(ch, "participants_count", None),
+                "verified": bool(getattr(ch, "verified", False)),
+                "joined": not getattr(ch, "left", True),
+            }
+            for ch in getattr(res, "chats", [])
+        ]
+        items = [{k: v for k, v in it.items() if v not in (None, False)} for it in items]
+        out: dict[str, Any] = {"items": items}
+        # Telegram sends a slice instead of the full list when it truncates the
+        # output (that happens without Premium): count then holds the real number.
+        total = getattr(res, "count", None)
+        if total is not None and total > len(items):
+            out["total"] = total
+            out["truncated"] = True
+            out["note"] = "Telegram hands out the full list of similar channels only with Premium"
+        return out
 
     async def participants(self, chat: Any, limit: int = 50, query: str | None = None) -> list[dict]:
         """Chat participants with DM links and metadata."""
@@ -1112,6 +1501,9 @@ class TelegramService:
             except Exception:
                 pass
 
+        if isinstance(msg.media, types.MessageMediaPoll):
+            out["votes"] = await self._poll_votes(peer, mid, msg.media)
+
         if getattr(msg, "out", False):
             # Whether the peer read my message. Works only in a DM, only on
             # fresh messages and only if they have not hidden read marks.
@@ -1139,6 +1531,81 @@ class TelegramService:
                 out["replies_error"] = str(exc)
         return {k: v for k, v in out.items() if v is not None}
 
+    async def _poll_votes(self, peer, msg_id: int, media, limit: int = 100) -> dict:
+        """Poll results: options, counters, who voted for what and my own vote.
+
+        A by-name list exists only for an open poll (public_voters). In an
+        anonymous one nobody has it, the author included — Telegram simply does
+        not hand such data out, so only the counters remain.
+        """
+        poll, results = media.poll, media.results
+        order = [a.option for a in poll.answers]
+        texts = {a.option: a.text.text for a in poll.answers}
+        tally = {r.option: r for r in (getattr(results, "results", None) or [])}
+
+        rows: list[dict] = []
+        for opt in order:
+            r = tally.get(opt)
+            row: dict[str, Any] = {"text": texts[opt], "voters": getattr(r, "voters", 0) or 0}
+            if getattr(r, "chosen", False):
+                row["chosen"] = True
+            if getattr(r, "correct", False):
+                row["correct"] = True
+            rows.append(row)
+
+        out: dict[str, Any] = {
+            "question": poll.question.text,
+            "anonymous": not bool(poll.public_voters),
+            "quiz": bool(poll.quiz),
+            "multiple": bool(poll.multiple_choice),
+            "closed": bool(poll.closed),
+            "total_voters": getattr(results, "total_voters", None) or 0,
+            "options": rows,
+        }
+        mine = [texts[o] for o in order if getattr(tally.get(o), "chosen", False)]
+        if mine:
+            out["my_vote"] = mine
+        if not tally:
+            # Until you vote, the server sends no interim results of a closed
+            # poll at all — that is not a bug, that is a Telegram rule.
+            out["note"] = "results are not visible yet: the poll hides them until you vote or until it closes"
+
+        if not poll.public_voters:
+            out["note"] = "the poll is anonymous: no by-name list exists, only counters"
+            return out
+
+        try:
+            res = await self.client(
+                functions.messages.GetPollVotesRequest(peer=peer, id=msg_id, limit=limit)
+            )
+        except Exception as exc:
+            if "PollVoteRequired" in type(exc).__name__:
+                # A poll with hidden results: until you vote yourself, Telegram
+                # hands out neither counters nor voters.
+                out["note"] = "the results are hidden until you vote yourself"
+            else:
+                out["votes_error"] = str(exc).split(" (caused")[0]
+            return out
+        names = {
+            utils.get_peer_id(e): entity_name(e)
+            for e in list(res.users) + list(getattr(res, "chats", []))
+        }
+        by: dict[bytes, list[dict]] = {}
+        for v in res.votes:
+            who = {"who": names.get(utils.get_peer_id(v.peer)), "at": _iso(v.date)}
+            # In a multiple choice the vote arrives as a list of options at once.
+            for opt in getattr(v, "options", None) or [getattr(v, "option", b"")]:
+                by.setdefault(opt, []).append(who)
+        for row, opt in zip(rows, order):
+            if by.get(opt):
+                row["by"] = by[opt]
+        out["voters_listed"] = len(res.votes)
+        # The server hands out no more than fifty at a time, so in crowded polls
+        # the list of voters is the top of it, not the whole cast.
+        if len(res.votes) < (out["total_voters"] or 0):
+            out["voters_truncated"] = True
+        return out
+
     async def resolve_link(self, link: str) -> dict:
         """What is behind this link: a person, a channel, an invite, a sticker
         pack, a message.
@@ -1147,6 +1614,14 @@ class TelegramService:
         """
         raw = str(link).strip()
         low = raw.lower()
+
+        # A phone number. Checked before everything else: "+79991234567" would
+        # otherwise look like a t.me/+hash invite. Only with an explicit plus —
+        # bare digits are an id.
+        digits = re.sub(r"[\s()\-. ]", "", raw)
+        if re.fullmatch(r"\+\d{7,15}", digits):
+            return await self._resolve_phone(digits)
+
         if not ("t.me/" in low or low.startswith("@") or "telegram.me/" in low):
             return {
                 "kind": "external",
@@ -1233,6 +1708,52 @@ class TelegramService:
                 out["message_error"] = str(exc)
         return {k: v for k, v in out.items() if v not in (None, False)}
 
+    async def _resolve_phone(self, phone: str) -> dict:
+        """Whether the number has Telegram — without writing to the contact book.
+
+        ImportContacts, for the same answer, creates a contact and shows the
+        number to its owner; contacts.resolvePhone only asks.
+        """
+        try:
+            res = await self.client(
+                functions.contacts.ResolvePhoneRequest(phone=phone.lstrip("+"))
+            )
+        except FloodWaitError as exc:
+            raise ValueError(
+                f"Telegram asks to wait {exc.seconds}s: lookup by number is rate-limited"
+            ) from exc
+        except Exception as exc:
+            name = type(exc).__name__
+            if "PhoneNumberInvalid" in name:
+                raise ValueError(f"The number {phone} is written incorrectly") from exc
+            if "PhoneNotOccupied" in name or "PHONE_NOT_OCCUPIED" in str(exc):
+                raise ValueError(
+                    f"No account is visible for the number {phone}. Telegram answers "
+                    "this way in two cases at once and does not tell them apart: there "
+                    "is no account at all, or the person forbade being found by number. "
+                    "There is nothing more to learn."
+                ) from exc
+            raise ValueError(f"Number {phone}: {str(exc).split(' (caused')[0]}") from exc
+
+        ents = {utils.get_peer_id(e): e for e in list(res.users) + list(res.chats)}
+        ent = ents.get(utils.get_peer_id(res.peer))
+        if ent is None:
+            raise ValueError(f"Telegram answered {phone} with an empty result")
+        out = {
+            "kind": self.dialog_kind_of(ent),
+            "phone": phone,
+            "id": utils.get_peer_id(ent),
+            "title": entity_name(ent),
+            "username": getattr(ent, "username", None),
+            "link": dm_link(ent) if isinstance(ent, types.User) else None,
+            "bot": bool(getattr(ent, "bot", False)),
+            "premium": bool(getattr(ent, "premium", False)),
+            "contact": bool(getattr(ent, "contact", False)),
+            "status": _user_status(ent) if isinstance(ent, types.User) else None,
+            "note": "no contact was created: the number was only checked",
+        }
+        return {k: v for k, v in out.items() if v not in (None, False)}
+
     @staticmethod
     def dialog_kind_of(entity) -> str:
         if isinstance(entity, types.User):
@@ -1261,6 +1782,112 @@ class TelegramService:
                 }
             )
         return rows
+
+    async def person(self, user: Any, messages: int = 20, chats: int = 10) -> dict:
+        """A dossier on a person in one call — what used to take five.
+
+        The boundary is honest: MTProto has no global message search by author,
+        so "what they wrote" here is the DM only. What the person wrote in a
+        shared group is read separately: history(chat=<group>, from_user=<them>).
+        """
+        ent = await self.client.get_entity(await self.resolve(user))
+        if not isinstance(ent, types.User):
+            raise ValueError(
+                f"{entity_name(ent)} is not a person but a {self.dialog_kind_of(ent)}; "
+                "for a chat there is chat_info"
+            )
+
+        fu = None
+        try:
+            fu = (await self.client(functions.users.GetFullUserRequest(ent))).full_user
+        except Exception:
+            pass
+
+        profile = {
+            "id": ent.id,
+            "name": entity_name(ent),
+            "username": f"@{ent.username}" if ent.username else None,
+            "link": dm_link(ent),
+            "phone": ent.phone,
+            "about": getattr(fu, "about", None),
+            "last_seen": _user_status(ent),
+            "bot": bool(ent.bot),
+            "premium": bool(getattr(ent, "premium", False)),
+            "verified": bool(getattr(ent, "verified", False)),
+            "scam": bool(getattr(ent, "scam", False)),
+            "fake": bool(getattr(ent, "fake", False)),
+            "deleted": bool(getattr(ent, "deleted", False)),
+            "contact": bool(getattr(ent, "contact", False)),
+            "mutual_contact": bool(getattr(ent, "mutual_contact", False)),
+            "blocked": bool(getattr(fu, "blocked", False)),
+            "me": bool(getattr(ent, "is_self", False)),
+        }
+        b = getattr(fu, "birthday", None)
+        if b is not None:
+            profile["birthday"] = f"{b.day:02d}.{b.month:02d}" + (
+                f".{b.year}" if getattr(b, "year", None) else ""
+            )
+        # A private note about the contact: only the account owner sees it, the
+        # other person does not know about it — which is what makes it most
+        # useful in a dossier.
+        note = getattr(fu, "note", None)
+        if note is not None:
+            profile["note"] = getattr(note, "text", None) or str(note)
+
+        out: dict[str, Any] = {
+            "profile": {k: v for k, v in profile.items() if v not in (None, False, "")},
+            "common_chats_count": getattr(fu, "common_chats_count", None),
+        }
+
+        if chats:
+            try:
+                out["common_chats"] = await self.common_chats(ent.id, limit=chats)
+            except Exception as exc:
+                out["common_chats_error"] = f"{type(exc).__name__}: {exc}"
+
+        # The place in the top of correspondents is Telegram's own rating, the
+        # same one that lifts people in the search bar. A missing row means "not
+        # in the top".
+        try:
+            res = await self.client(
+                functions.contacts.GetTopPeersRequest(
+                    correspondents=True, bots_pm=False, bots_inline=False,
+                    phone_calls=False, forward_users=False, forward_chats=False,
+                    groups=False, channels=False, offset=0, limit=100, hash=0,
+                )
+            )
+            for cat in getattr(res, "categories", []):
+                for i, p in enumerate(cat.peers):
+                    if getattr(p.peer, "user_id", None) == ent.id:
+                        out["top_rating"] = {
+                            "rank": i + 1,
+                            "of": len(cat.peers),
+                            "rating": round(p.rating, 2),
+                        }
+        except Exception:
+            pass
+
+        conv: dict[str, Any] = {}
+        try:
+            recent = [
+                self.message_dict(m)
+                async for m in self.client.iter_messages(ent, limit=messages)
+            ]
+            conv["messages"] = list(reversed(recent))
+            total = await self.client.get_messages(ent, limit=0)
+            conv["total"] = getattr(total, "total", None)
+            first = await self.client.get_messages(ent, limit=1, reverse=True)
+            if first:
+                # The oldest of what is *left*: a cleared history shifts this
+                # date, so this is the start of the correspondence, not of the
+                # acquaintance.
+                conv["since"] = _iso(first[0].date)
+                conv["first_text"] = (first[0].message or _media_kind(first[0]) or "")[:160]
+        except Exception as exc:
+            conv["error"] = f"{type(exc).__name__}: {exc}"
+        out["conversation"] = conv
+
+        return {k: v for k, v in out.items() if v is not None}
 
     async def drafts(self) -> list[dict]:
         """All unsent drafts across the account."""
@@ -1303,19 +1930,31 @@ class TelegramService:
 
     async def activity(
         self,
-        since: str = "today",
+        since: str | None = None,
         until: str | None = None,
         limit_chats: int = 100,
         kind: str | None = None,
         include_own: bool = True,
         per_chat: int = 0,
+        chat: Any = None,
+        limit_days: int = 120,
     ) -> dict:
         """Where any conversation happened over a period: today, over a day, over
         any stretch.
 
         Answers "which chats did I talk in today" — unlike `unread`, chats that
         were read get in here too, and so do those where only you wrote.
+
+        With `chat` the axis changes: not "where the conversation happened over a
+        period" but "how the conversation went in this chat day by day" — a
+        calendar over the whole history. The meaning of `kind` changes there as
+        well: within one chat there is nothing left to filter by dialog type, but
+        a calendar for a single attachment type can be asked for.
         """
+        if chat is not None:
+            return await self._chat_calendar(chat, since, until, limit_days, kind)
+        if since is None:
+            since = "today"
         start = _day_start() if str(since).lower() in ("today", "сегодня") else _parse_when(since)
         end = _parse_when(until) if until else None
         rows: list[dict] = []
@@ -1379,6 +2018,189 @@ class TelegramService:
             "scanned_dialogs": scanned,
             "items": rows,
         }
+
+    # How many points to ask the server for the sparse day-by-day layout. It
+    # will not hand out more than 2000 anyway, and at that ceiling a chat of up
+    # to 2000 messages is laid out by day exactly, message for message.
+    CALENDAR_POINTS = 2000
+
+    async def _chat_calendar(
+        self, chat: Any, since: Any, until: Any, limit_days: int, kind: str | None
+    ) -> dict:
+        """On which days the chat had a conversation and how many messages there were.
+
+        The history is not downloaded for this: the day-by-day layout is counted
+        by the server itself, which also keeps it for the client's "jump to
+        date".
+
+        Without `kind` all messages are counted, with `kind` only one attachment
+        type (see MEDIA_FILTERS). The mechanisms differ because the real calendar
+        `messages.getSearchResultsCalendar` works only with a concrete filter: to
+        InputMessagesFilterEmpty the server answers FILTER_NOT_SUPPORTED. For
+        "all messages" what is left is `messages.getSearchResultsPositions` —
+        sparse message positions with dates; from the difference of positions it
+        is exactly known how many messages lie between two points, so the daily
+        counter is honest as long as at least one point falls into the day.
+        """
+        target = await self.resolve(chat)
+        ent = await self.client.get_input_entity(target)
+        who = await self.client.get_entity(target)
+        name = "Saved Messages" if target == "me" else entity_name(who)
+        start = None
+        if since is not None:
+            start = (
+                _day_start()
+                if str(since).lower() in ("today", "сегодня")
+                else _parse_when(since)
+            )
+        end = _parse_when(until) if until else None
+        limit_days = max(1, min(int(limit_days), 1000))
+        # Boundaries are compared by day: a period in the answer is a whole day,
+        # and a day that started before since may still hold messages after it.
+        start_day = _utc_day(start)
+        end_day = _utc_day(end)
+
+        if kind:
+            if kind not in MEDIA_FILTERS:
+                raise ValueError(
+                    "kind for a chat calendar is one of: "
+                    + ", ".join(sorted(MEDIA_FILTERS))
+                )
+            rows, total, exact, step = await self._calendar_days(
+                ent, MEDIA_FILTERS[kind], start_day, end_day, limit_days, end
+            )
+        else:
+            rows, total, exact, step = await self._sparse_days(
+                ent, start_day, end_day, limit_days
+            )
+
+        out = {
+            "chat": name,
+            "id": utils.get_peer_id(who),
+            "kind": kind,
+            "since": start_day,
+            "until": end_day,
+            "days": len(rows),
+            "messages": sum(r["messages"] for r in rows),
+            "total_in_chat": total,
+            "first_day": rows[-1]["day"] if rows else None,
+            "last_day": rows[0]["day"] if rows else None,
+            "exact": exact,
+            "truncated": len(rows) >= limit_days,
+            "items": rows,
+        }
+        if not exact:
+            out["sampled_every"] = step
+            out["note"] = (
+                f"the count was taken by sampling roughly every {step}th message: "
+                f"per day it overshoots by up to {step} messages, and a day with "
+                "fewer messages than the step may not make the list at all"
+            )
+        return out
+
+    async def _calendar_days(
+        self,
+        ent,
+        flt,
+        start_day: str | None,
+        end_day: str | None,
+        limit_days: int,
+        end: datetime | None,
+    ) -> tuple[list[dict], int | None, bool, int]:
+        """An exact calendar for one attachment type, page by page down the history."""
+        rows: list[dict] = []
+        by_day: dict[str, dict] = {}
+        total = None
+        offset_id, offset_date = 0, end
+        while True:
+            res = await self.client(
+                functions.messages.GetSearchResultsCalendarRequest(
+                    peer=ent, filter=flt(), offset_id=offset_id, offset_date=offset_date
+                )
+            )
+            if total is None:
+                total = res.count
+            periods = list(getattr(res, "periods", None) or [])
+            if not periods:
+                break
+            done = False
+            for p in periods:
+                if p.date is None:
+                    continue
+                day = _utc_day(p.date)
+                if end_day and day > end_day:
+                    continue
+                if start_day and day < start_day:
+                    done = True
+                    break
+                row = by_day.get(day)
+                if row is None:
+                    if len(rows) >= limit_days:
+                        done = True
+                        break
+                    row = {
+                        "day": day,
+                        "messages": 0,
+                        "min_id": p.min_msg_id,
+                        "max_id": p.max_msg_id,
+                    }
+                    by_day[day] = row
+                    rows.append(row)
+                # A day can arrive in two pieces: the page breaks off in the
+                # middle of the day, and the remainder of that same day comes
+                # with the next one.
+                row["messages"] += p.count
+                row["min_id"] = min(row["min_id"], p.min_msg_id)
+                row["max_id"] = max(row["max_id"], p.max_msg_id)
+            last = periods[-1]
+            if done or not last.min_msg_id or last.min_msg_id == offset_id:
+                break
+            offset_id, offset_date = last.min_msg_id, last.date
+        return rows, total, True, 1
+
+    async def _sparse_days(
+        self, ent, start_day: str | None, end_day: str | None, limit_days: int
+    ) -> tuple[list[dict], int | None, bool, int]:
+        """The day-by-day layout for all messages — from sparse positions."""
+        res = await self.client(
+            functions.messages.GetSearchResultsPositionsRequest(
+                peer=ent,
+                filter=types.InputMessagesFilterEmpty(),
+                offset_id=0,
+                limit=self.CALENDAR_POINTS,
+            )
+        )
+        points = list(getattr(res, "positions", None) or [])
+        total = res.count
+        exact = len(points) >= total
+        step = max(1, round(total / len(points))) if points else 1
+
+        by_day: dict[str, dict] = {}
+        order: list[str] = []
+        for i, p in enumerate(points):
+            # Points go from new to old, offset is the ordinal number of the
+            # message counted from the end of the chat, so the difference to the
+            # next point is exactly the number of messages in between.
+            nxt = points[i + 1].offset if i + 1 < len(points) else total
+            span = max(int(nxt) - int(p.offset), 1)
+            day = _utc_day(p.date)
+            if day is None:
+                continue
+            if end_day and day > end_day:
+                continue
+            if start_day and day < start_day:
+                break
+            row = by_day.get(day)
+            if row is None:
+                if len(order) >= limit_days:
+                    break
+                row = {"day": day, "messages": 0, "min_id": p.msg_id, "max_id": p.msg_id}
+                by_day[day] = row
+                order.append(day)
+            row["messages"] += span
+            row["min_id"] = min(row["min_id"], p.msg_id)
+            row["max_id"] = max(row["max_id"], p.msg_id)
+        return [by_day[d] for d in order], total, exact, step
 
     async def export(
         self,
@@ -1522,6 +2344,209 @@ class TelegramService:
             "format": format,
         }
         return {k: v for k, v in out.items() if v is not None}
+
+    # ---------- the local conversation index ----------
+
+    def _index_store(self) -> MessageIndex:
+        return MessageIndex(config.index_path(self.account))
+
+    async def _index_target(self, chat: Any) -> tuple[int, str, str, Any]:
+        """A chat → (id, title, type, entity for iter_messages)."""
+        ent = await self.resolve(chat)
+        if ent == "me":
+            me = self.me or await self.client.get_me()
+            return me.id, "Saved Messages", "saved", ent
+        entity = await self.client.get_entity(ent)
+        if isinstance(entity, types.User):
+            kind = "bot" if entity.bot else "user"
+        elif getattr(entity, "broadcast", False):
+            kind = "channel"
+        else:
+            kind = "group"
+        return utils.get_peer_id(entity), entity_name(entity), kind, entity
+
+    def _index_row(self, msg) -> dict:
+        """An index row. Files are not stored — only the attachment type."""
+        sender = msg.sender
+        name = entity_name(sender) if sender else getattr(msg, "post_author", None)
+        kind = _media_kind(msg)
+        text = msg.message or ""
+        if not text and kind:
+            # An empty message with an attachment would otherwise be findable by
+            # nothing: we put the type in as a word, so that "photo" and "voice"
+            # are ordinary search words.
+            text = f"[{kind}]"
+        return {
+            "msg_id": msg.id,
+            "ts": int(msg.date.timestamp()) if msg.date else None,
+            "date": _iso(msg.date),
+            "from_id": getattr(sender, "id", None) or getattr(msg.from_id, "user_id", None),
+            "from_name": name,
+            "out": bool(msg.out),
+            "media": kind,
+            "text": text,
+        }
+
+    async def _index_pull(
+        self, store: MessageIndex, ent: Any, chat_id: int, name: str, kind: str,
+        *, cap: int, deadline: float, min_id: int = 0, offset_id: int = 0,
+        since_dt: datetime | None = None,
+    ) -> tuple[int, int, str | None]:
+        """Page through the history the way export() does, but into the database
+        and in batches."""
+        rows: list[dict] = []
+        added = seen = 0
+        stopped: str | None = None
+        try:
+            async for m in self.client.iter_messages(
+                ent, limit=cap, min_id=min_id, offset_id=offset_id
+            ):
+                if since_dt and m.date and m.date < since_dt:
+                    stopped = "since"
+                    break
+                rows.append(self._index_row(m))
+                seen += 1
+                if len(rows) >= INDEX_BATCH:
+                    added += store.add(chat_id, name, kind, rows)
+                    rows = []
+                if time.monotonic() > deadline:
+                    stopped = "budget"
+                    break
+        except FloodWaitError as exc:
+            # We neither sleep nor fail: the batches are already in the database,
+            # the boundaries have moved, and the next sync will continue from
+            # exactly there. Hanging half an hour inside one call is worse here
+            # than returning half of it and saying so plainly.
+            stopped = f"flood_wait:{exc.seconds}s"
+        except asyncio.CancelledError:
+            if rows:
+                store.add(chat_id, name, kind, rows)
+            raise
+        if rows:
+            added += store.add(chat_id, name, kind, rows)
+        return added, seen, stopped
+
+    async def _index_chat(
+        self, store: MessageIndex, chat: Any, since_dt: datetime | None,
+        cap: int, deadline: float, backfill: bool,
+    ) -> dict:
+        chat_id, name, kind, ent = await self._index_target(chat)
+        state = store.chat_state(chat_id)
+        # The first pass over a chat always goes deep: otherwise a sync without
+        # parameters would enter the chat into the index and put not a single
+        # message into it.
+        backfill = backfill or state is None
+        added = seen = 0
+        stopped = None
+
+        # The fresh part first: min_id cuts off everything already in the index,
+        # so the usual top-up costs exactly as many messages as arrived since
+        # last time.
+        if state and state["max_id"]:
+            added, seen, stopped = await self._index_pull(
+                store, ent, chat_id, name, kind,
+                cap=cap, deadline=deadline, min_id=state["max_id"],
+            )
+        # Then deep — but only when asked for it: the chat is being indexed for
+        # the first time, a period was named or a limit was set explicitly.
+        # Otherwise every top-up would drag the history back to the very
+        # beginning of the conversation.
+        if stopped is None and backfill and seen < cap:
+            more, more_seen, stopped = await self._index_pull(
+                store, ent, chat_id, name, kind,
+                cap=cap - seen, deadline=deadline,
+                offset_id=(state or {}).get("min_id") or 0, since_dt=since_dt,
+            )
+            added += more
+            seen += more_seen
+        store.add(chat_id, name, kind, [])   # record the chat and time even on an empty top-up
+        row = {
+            "chat": name, "chat_id": chat_id, "kind": kind,
+            "added": added, "scanned": seen, "stopped": stopped,
+        }
+        return {k: v for k, v in row.items() if v is not None}
+
+    async def index(
+        self,
+        action: str = "sync",
+        chats: list | None = None,
+        since: str | None = None,
+        limit: int | None = None,
+    ) -> dict:
+        """The local search index over the conversation: `sync`, `status`, `drop`.
+
+        Not a single chat is indexed by itself: `sync` without `chats` only tops
+        up what the owner has already entered by hand. That is not a convenience
+        but a boundary — the index puts the conversation on disk in a parseable
+        form.
+        """
+        if action not in ("sync", "status", "drop"):
+            raise ValueError("action: sync, status or drop")
+        store = self._index_store()
+
+        if action == "status":
+            return store.status() | {"account": self.account}
+
+        if action == "drop":
+            if not chats:
+                return store.drop() | {"account": self.account}
+            ids = [(await self._index_target(one))[0] for one in config.as_list(chats)]
+            return store.drop(ids) | {"account": self.account}
+
+        targets = config.as_list(chats)
+        if not targets:
+            known = store.status()["chats"] if store.exists() else []
+            if not known:
+                raise ValueError(
+                    "the index is empty and no chats were named. Nothing gets indexed "
+                    'by itself: list the chats explicitly — index(action="sync", '
+                    'chats=["Mum", "Work"])'
+                )
+            targets = [c["chat_id"] for c in known]
+        if len(targets) > 25:
+            raise ValueError("no more than 25 chats at a time")
+
+        since_dt = None
+        if since:
+            since_dt = (
+                _day_start() if str(since).lower() in ("today", "сегодня")
+                else _parse_when(since)
+            )
+        backfill = bool(since or limit)
+        cap = max(1, min(int(limit or INDEX_DEFAULT_LIMIT), INDEX_MAX_LIMIT))
+        deadline = time.monotonic() + INDEX_BUDGET_SEC
+
+        items: list[dict] = []
+        for one in targets:
+            if time.monotonic() > deadline:
+                items.append({"chat": str(one), "stopped": "budget", "added": 0})
+                continue
+            try:
+                items.append(
+                    await self._index_chat(store, one, since_dt, cap, deadline, backfill)
+                )
+            except (ValueError, RuntimeError) as exc:
+                items.append({"chat": str(one), "error": f"{type(exc).__name__}: {exc}"})
+
+        state = store.status()
+        out = {
+            "action": "sync",
+            "account": self.account,
+            "chats": len(items),
+            "added": sum(i.get("added", 0) for i in items),
+            "items": items,
+            "indexed_messages": state["messages"],
+            "bytes": state.get("bytes"),
+            "path": state["path"],
+        }
+        if any(i.get("stopped") in ("budget",) or str(i.get("stopped") or "").startswith("flood_wait")
+               for i in items):
+            out["note"] = (
+                "not everything was topped up (time or flood-wait). The sync is "
+                "incremental — call sync again, it will continue from the same "
+                "boundary."
+            )
+        return out
 
     # ---------- looking at media and listening to it ----------
 
@@ -2149,6 +3174,133 @@ class TelegramService:
                 row["message"] = (msg.message or "")[:200]
             rows.append(row)
         return {"chat": entity_name(await self.client.get_entity(ent)), "count": len(rows), "events": rows}
+
+    async def invites(
+        self, chat: Any, link: str | None = None, limit: int = 50, revoked: bool = False
+    ) -> dict:
+        """The invite links of a chat: without link which ones exist, with link who
+        came through it.
+
+        Admin rights are needed: Telegram hands these lists out only to those who
+        can manage invites.
+        """
+        ent = await self.resolve(chat)
+        peer = await self.client.get_input_entity(ent)
+        name = entity_name(await self.client.get_entity(ent))
+
+        if link:
+            full = str(link).strip()
+            # Telegram expects the whole link; a bare hash from t.me/+hash we complete.
+            if not full.startswith("http"):
+                full = "https://t.me/" + (full if full.startswith("+") else "+" + full.lstrip("+"))
+            try:
+                res = await self.client(
+                    functions.messages.GetChatInviteImportersRequest(
+                        peer=peer,
+                        offset_date=None,
+                        offset_user=types.InputUserEmpty(),
+                        limit=limit,
+                        link=full,
+                    )
+                )
+            except Exception as exc:
+                raise self._invites_error(exc, name) from exc
+            users = {u.id: u for u in res.users}
+            rows = []
+            for imp in res.importers:
+                u = users.get(imp.user_id)
+                rows.append(
+                    {
+                        "id": imp.user_id,
+                        "name": entity_name(u) if u is not None else str(imp.user_id),
+                        "username": getattr(u, "username", None),
+                        "link": dm_link(u) if u is not None else None,
+                        "joined": _iso(imp.date),
+                        "requested": bool(imp.requested),
+                        "approved_by": entity_name(users[imp.approved_by])
+                        if imp.approved_by and imp.approved_by in users
+                        else None,
+                        "about": imp.about,
+                    }
+                )
+            return {
+                "chat": name,
+                "link": full,
+                "total": res.count,
+                "joined": [{k: v for k, v in r.items() if v not in (None, False)} for r in rows],
+            }
+
+        try:
+            res = await self.client(
+                functions.messages.GetExportedChatInvitesRequest(
+                    peer=peer,
+                    admin_id=types.InputUserSelf(),
+                    limit=limit,
+                    revoked=bool(revoked),
+                )
+            )
+        except Exception as exc:
+            raise self._invites_error(exc, name) from exc
+        links = []
+        for inv in res.invites:
+            row = {
+                "link": getattr(inv, "link", None),
+                "title": getattr(inv, "title", None),
+                "permanent": bool(getattr(inv, "permanent", False)),
+                "revoked": bool(getattr(inv, "revoked", False)),
+                "request_needed": bool(getattr(inv, "request_needed", False)),
+                "created": _iso(getattr(inv, "date", None)),
+                "expires": _iso(getattr(inv, "expire_date", None)),
+                "usage_limit": getattr(inv, "usage_limit", None),
+                "used": getattr(inv, "usage", None),
+                "pending_requests": getattr(inv, "requested", None),
+            }
+            links.append({k: v for k, v in row.items() if v not in (None, False)})
+        out: dict[str, Any] = {
+            "chat": name,
+            "mine": True,          # admin_id=self: these are the links I created
+            "revoked_only": bool(revoked),
+            "total": res.count,
+            "links": links,
+        }
+        # Who else hands out links in this chat — a separate request, and it also
+        # requires rights, so its absence must not bring down the whole answer.
+        try:
+            adm = await self.client(
+                functions.messages.GetAdminsWithInvitesRequest(peer=peer)
+            )
+            names = {u.id: entity_name(u) for u in adm.users}
+            rows = [
+                {
+                    "id": a.admin_id,
+                    "name": names.get(a.admin_id, str(a.admin_id)),
+                    "links": a.invites_count,
+                    "revoked": a.revoked_invites_count,
+                }
+                for a in adm.admins
+            ]
+            if rows:
+                out["admins"] = rows
+        except Exception:
+            pass
+        return out
+
+    @staticmethod
+    def _invites_error(exc: Exception, chat: str) -> ValueError:
+        """Telegram answers with a dry code — we turn it into an explanation."""
+        name = type(exc).__name__
+        text = str(exc).split(" (caused")[0]
+        if "ChatAdminRequired" in name:
+            return ValueError(
+                f"\"{chat}\": admin rights are needed — invites are seen only by the one "
+                "who can manage them. Ask the chat owner to grant the right, or ask "
+                "them directly."
+            )
+        if "InviteHashExpired" in name or "InviteHashInvalid" in name:
+            return ValueError(f"\"{chat}\": no such link in this chat, or it is already revoked")
+        if "PeerIdInvalid" in name or "ChannelInvalid" in name:
+            return ValueError(f"\"{chat}\": a DM never has invites")
+        return ValueError(f"\"{chat}\": {text}")
 
     async def bot_info(self, bot: Any, lang_code: str = "") -> dict:
         """What your bot has on record: name, description, short description, commands."""

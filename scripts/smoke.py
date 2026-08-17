@@ -49,18 +49,25 @@ async def main() -> int:
         dialogs = await call(s, "dialogs", limit=40)
         probe = "me"
 
-        cases: list[tuple[str, dict]] = [
+        # the third element is a suffix for the name: it tells apart calls of one and
+        # the same method with different params, once kind alone no longer distinguishes them.
+        cases: list[tuple] = [
             ("status", {}),
             ("accounts", {}),
             ("structure", {}),
             ("folders", {}),
             ("dialogs", {"limit": 5}),
             ("unread", {}),
+            ("pending", {"limit": 5}),
+            ("pending", {"direction": "mine", "min_age_hours": 24, "limit": 5}, "mine"),
+            ("pending", {"direction": "both", "kind": "user", "limit": 5}, "both/user"),
             ("history", {"chat": probe, "limit": 3}),
             ("history_batch", {"chats": [probe], "limit": 2}),
             ("search", {"query": "http", "limit": 3}),
             ("mentions", {"limit": 3}),
             ("chat_info", {"chat": probe}),
+            ("chat_info", {"chat": probe, "counters": False}, "no counters"),
+            ("person", {"user": "me", "messages": 5, "chats": 5}),
             ("contacts", {"limit": 5}),
             ("drafts", {}),
             ("scheduled", {"chat": probe}),
@@ -71,6 +78,11 @@ async def main() -> int:
             ("media", {"chat": probe, "kind": "link", "limit": 3}),
             ("media", {"chat": probe, "kind": "voice", "limit": 3}),
             ("activity", {"since": "today", "limit_chats": 5}),
+            ("activity", {"chat": probe, "limit_days": 7}, "by chat"),
+            ("actions", {"limit": 5}),
+            ("actions", {"since": "today", "limit": 5}, "for today"),
+            ("remind", {"list": True}, "list"),
+            ("index", {"action": "status"}, "status"),
             ("saved_tags", {}),
             ("stories", {}),
             ("sessions", {}),
@@ -83,14 +95,81 @@ async def main() -> int:
             ("search", {"chat": probe, "kind": "file", "limit": 3}),
             ("wait", {"keyword": "nothing-of-the-sort-will-arrive", "timeout": 5}),
         ]
-        for method, params in cases:
-            label = method + (f"({params.get('kind')})" if params.get("kind") else "")
+        for case in cases:
+            method, params = case[0], case[1]
+            note = case[2] if len(case) > 2 else params.get("kind")
+            label = method + (f"({note})" if note else "")
             try:
                 res = await call(s, method, **params)
                 print(f"ok    {label:22} {brief(res)}")
             except Exception as exc:
                 failures += 1
                 print(f"FAIL  {label:22} {exc}")
+
+        # Next come the methods that need data the account may not have: a chat where
+        # I am an admin, a filled index, a channel in the list. Missing such data is a
+        # skip, not a failure, so every case is checked separately.
+
+        # invite links: they are given out only by a chat where I am an admin
+        try:
+            shown = False
+            for d in dialogs:
+                if d.get("type") not in ("group", "channel"):
+                    continue
+                try:
+                    res = await call(s, "invites", chat=d["id"], limit=3)
+                except Exception:
+                    continue
+                print(f"ok    {'invites':22} links: {res.get('total')}, admins: {len(res.get('admins') or [])}")
+                shown = True
+                break
+            if not shown:
+                print("skip invites: no chat where I have admin rights")
+        except Exception as exc:
+            failures += 1
+            print(f"FAIL  {'invites':22} {exc}")
+
+        # Telegram returns similar channels only for channels
+        try:
+            channel = next((d for d in dialogs if d.get("type") == "channel"), None)
+            if channel:
+                res = await call(s, "chat_info", chat=channel["id"], similar=True)
+                sim = res.get("similar") or {}
+                got = sim.get("error") or f"similar channels: {len(sim.get('items') or [])}"
+                print(f"ok    {'chat_info(similar)':22} {got}")
+            else:
+                print("skip chat_info(similar): no channels in the dialog list")
+        except Exception as exc:
+            failures += 1
+            print(f"FAIL  {'chat_info(similar)':22} {exc}")
+
+        # local search: without a filled index there is nothing to search through
+        try:
+            status = await call(s, "index", action="status")
+            indexed = [c for c in (status.get("chats") or [])]
+            if indexed:
+                res = await call(s, "search", query="a", engine="local", limit=3)
+                print(f"ok    {'search(local)':22} found {res.get('total')} in {res.get('indexed_chats')} chats")
+                res = await call(s, "search", query="a", engine="local", author="me", limit=3)
+                print(f"ok    {'search(local,author)':22} found {res.get('total')}")
+            else:
+                print("skip search(local): the local index is empty")
+        except Exception as exc:
+            failures += 1
+            print(f"FAIL  {'search(local)':22} {exc}")
+
+        # Saved Messages filtered by source: an empty answer here is a normal answer,
+        # the path itself is what is checked, not the presence of something forwarded from a particular chat
+        try:
+            source = next((d for d in dialogs if d.get("id") != me["account"]["id"]), None)
+            if source:
+                res = await call(s, "history", chat="me", saved_from=source["id"], limit=3)
+                print(f"ok    {'history(saved_from)':22} messages: {res.get('total')}")
+            else:
+                print("skip history(saved_from): there are no dialogs besides Saved Messages")
+        except Exception as exc:
+            failures += 1
+            print(f"FAIL  {'history(saved_from)':22} {exc}")
 
         # viewing a picture and transcribing a voice message — only if there is something to do it on
         try:
