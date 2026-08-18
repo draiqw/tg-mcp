@@ -9,6 +9,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from .i18n import t
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # Both locations are overridable so the same code runs from a checkout, from an
@@ -103,10 +105,10 @@ def parse_digest_times(value: object) -> list[tuple[int, int]]:
             continue
         parts = text.replace(".", ":").split(":")
         if len(parts) != 2 or not all(p.strip().isdigit() for p in parts):
-            raise ValueError(f"digest_at: {raw!r} — expected the format HH:MM")
+            raise ValueError(t("rules.digest_at_format", value=repr(raw)))
         hour, minute = int(parts[0]), int(parts[1])
         if not (0 <= hour < 24 and 0 <= minute < 60):
-            raise ValueError(f"digest_at: {raw!r} — there is no such time")
+            raise ValueError(t("rules.digest_at_range", value=repr(raw)))
         out.append((hour, minute))
     return sorted(set(out))
 
@@ -121,28 +123,27 @@ def validate_auto(value: object) -> list[dict]:
     if value is None:
         return []
     if not isinstance(value, list):
-        raise ValueError("auto: expected a list of rules")
+        raise ValueError(t("rules.auto_not_list"))
     out: list[dict] = []
     for i, raw in enumerate(value, 1):
         if not isinstance(raw, dict):
-            raise ValueError(f"auto[{i}]: a rule is an object, not {type(raw).__name__}")
+            raise ValueError(t("rules.auto_not_object", i=i, kind=type(raw).__name__))
         rule = dict(raw)
         actions = [str(a).strip().lower() for a in as_list(rule.get("action"))]
         unknown = [a for a in actions if a not in AUTO_ACTIONS]
         if not actions or unknown:
             raise ValueError(
-                f"auto[{i}]: action — one or several of {', '.join(AUTO_ACTIONS)}"
-                + (f"; do not know: {', '.join(unknown)}" if unknown else "")
+                t("rules.auto_action", i=i, actions=", ".join(AUTO_ACTIONS))
+                + (t("rules.auto_action_unknown", unknown=", ".join(unknown)) if unknown else "")
             )
         if "folder" in actions and not str(rule.get("folder") or "").strip():
-            raise ValueError(f"auto[{i}]: the folder action needs a folder in the folder field")
+            raise ValueError(t("rules.auto_folder_needed", i=i))
         kind = rule.get("type")
         if kind is not None and str(kind).strip().lower() not in AUTO_TYPES:
-            raise ValueError(f"auto[{i}]: type — one of {', '.join(AUTO_TYPES)}")
+            raise ValueError(t("rules.auto_type", i=i, types=", ".join(AUTO_TYPES)))
         if not any(rule.get(k) for k in AUTO_CONDITIONS):
             raise ValueError(
-                f"auto[{i}]: at least one condition is needed ({', '.join(AUTO_CONDITIONS)}) — "
-                "a rule without conditions would fire on every incoming message"
+                t("rules.auto_no_condition", i=i, conditions=", ".join(AUTO_CONDITIONS))
             )
         rule["action"] = actions
         out.append(rule)
@@ -181,14 +182,13 @@ def client_info() -> dict[str, str]:
 def normalize_account(account: str | None) -> str:
     label = (account or MAIN_ACCOUNT).strip().lower()
     # The last one is the Russian for "main". Aliases are input, not output: they
-    # are what a person types, and nothing else here says anything about the
-    # keyboard in front of them. An alias costs nothing; a rejected label costs
-    # a command.
+    # are what a person types, and TG_LANG says nothing about the keyboard in
+    # front of them. An alias costs nothing; a rejected label costs a command.
     if label in ("", "main", "default", "основной"):
         return MAIN_ACCOUNT
     safe = "".join(c for c in label if c.isalnum() or c in "-_")
     if not safe:
-        raise ValueError(f"Bad account label: {account!r}")
+        raise ValueError(t("account.bad_label", account=repr(account)))
     return safe
 
 
@@ -262,7 +262,7 @@ def add_account_command() -> str:
     normalization would strip the angle brackets out and substitute a name that
     does not exist.
     """
-    return f"{login_command()} --account <label>"
+    return f"{login_command()} --account {t('account.label_placeholder')}"
 
 
 def not_logged_in(account: str | None, known: list[str] | None = None) -> str:
@@ -271,11 +271,8 @@ def not_logged_in(account: str | None, known: list[str] | None = None) -> str:
     sign anyone in — so the whole point of the message is that the owner can run it
     word for word."""
     label = normalize_account(account)
-    have = ", ".join(known) if known else "none"
-    return (
-        f"Account {label!r} is not signed in (available: {have}). The owner signs in themselves, "
-        f"the agent never sees the code: {login_command(label)}"
-    )
+    have = ", ".join(known) if known else t("account.none_known")
+    return t("account.not_logged_in", label=repr(label), have=have, command=login_command(label))
 
 
 class SetupError(RuntimeError):
@@ -296,15 +293,9 @@ def setup_hint() -> str | None:
     for one unfinished installation are three different ideas of what to do next.
     """
     if not (env("TG_API_ID") and env("TG_API_HASH")):
-        return (
-            "The app keys (TG_API_ID/TG_API_HASH) are not set — you get them at "
-            f"my.telegram.org. The whole setup: cd {ROOT} && uv run tg init"
-        )
+        return t("setup.no_api_keys", root=ROOT)
     if not list_accounts():
-        return (
-            "There is no Telegram session at all. The owner signs in themselves, the agent "
-            f"never sees the code: {login_command()}"
-        )
+        return t("setup.no_session", command=login_command())
     return None
 
 
@@ -330,10 +321,7 @@ def env(name: str, default: str | None = None) -> str | None:
 def require_env(name: str) -> str:
     val = env(name)
     if not val:
-        raise SetupError(
-            f"{name} is set neither in the environment nor in {ENV_FILE}. "
-            f"Run the setup in your own terminal: cd {ROOT} && uv run tg init"
-        )
+        raise SetupError(t("setup.env_missing", name=name, env_file=ENV_FILE, root=ROOT))
     return val
 
 

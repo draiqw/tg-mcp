@@ -1085,6 +1085,16 @@ The auto-rules are the same checkboxes as in the app: `contacts`,
 
 ## Alerts
 
+The text that reaches the owner — alerts, digests, reminders and the questions
+`tg_ask` puts into the bot — is written in the language of `TG_LANG` (`en` or
+`ru`, `en` by default), the same setting that decides what `tg` prints in the
+terminal. Values like `ru_RU.UTF-8` or `en-GB` are understood, and an unsupported
+language falls back to `en`. The value is read on every call, so an edit to
+`.env` takes effect without restarting the daemon. What the tools return to
+Claude — fields, notes, explanations of errors — is English regardless: the
+catalogue in `tgagent/i18n.py` holds both languages side by side and covers only
+what the owner reads, and `scripts/selfcheck.py` checks its two halves for gaps.
+
 ### `tg_alert(text)`
 A message to the owner through the agent's bot. This is the right way to
 "warn" — not writing to Saved Messages and not sending yourself a DM.

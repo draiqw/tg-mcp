@@ -39,6 +39,7 @@ from getpass import getpass
 from pathlib import Path
 
 from . import config
+from .i18n import t
 
 MCP_NAME = "telegram"
 AGENT_FILES = ("telegram.md", "telegram-watch.md")
@@ -118,41 +119,20 @@ def autostart_paths() -> tuple[Path, Path] | None:
 # Sign-in errors whose cause and way out are known in advance. The keys are
 # Telegram codes: `capabilities.error_codes` digs them out, and this is the same
 # analysis that explains tool errors — there is no private copy of the code table
-# here.
+# here. The values are catalog keys, not texts: the owner reads these, so the
+# wording lives in `i18n` and is resolved at the moment of the failure.
 LOGIN_HINTS: dict[str, str] = {
-    "PHONE_CODE_INVALID":
-        "the code did not fit. It arrives in the Telegram app itself (not SMS) and is "
-        "typed without spaces. Start the sign-in again: uv run tg login",
-    "PHONE_CODE_EXPIRED":
-        "the code has gone stale — Telegram keeps it for a few minutes. Request a new "
-        "one: uv run tg login",
-    "PHONE_CODE_EMPTY": "no code was entered. Start the sign-in again: uv run tg login",
-    "PHONE_NUMBER_INVALID":
-        "Telegram did not accept the number. It needs the international format with a "
-        "plus, for example +79991234567.",
-    "PHONE_NUMBER_BANNED": "this number is banned in Telegram — signing in with it is impossible.",
-    "PASSWORD_HASH_INVALID":
-        "the cloud password of two-step verification did not fit. This is the Telegram "
-        "password (Settings → Privacy and Security → Two-Step Verification), not the "
-        "password of your mail or Apple ID. To repeat only the password: "
-        "uv run tg password",
-    "SESSION_PASSWORD_NEEDED":
-        "the account has two-step verification on: only the password is left. Type it "
-        "yourself in the terminal: uv run tg password",
-    "API_ID_INVALID":
-        "Telegram did not accept api_id/api_hash. Check that they were copied from "
-        "my.telegram.org → API development tools in full: uv run tg setup",
-    "API_ID_PUBLISHED_FLOOD":
-        "Telegram considers these api_id/api_hash leaked into public access and has "
-        "limited them. Create a new application on my.telegram.org and enter its keys: "
-        "uv run tg setup",
-    "AUTH_KEY_DUPLICATED":
-        "the session file was used from another machine at the same time, and Telegram "
-        "revoked it. data/session.session must not be copied between machines — sign in "
-        "again: uv run tg login",
-    "AUTH_KEY_UNREGISTERED":
-        "the session was revoked on the Telegram side (usually it was closed in the "
-        "device list). Sign in again: uv run tg login",
+    "PHONE_CODE_INVALID": "login.hint_code_invalid",
+    "PHONE_CODE_EXPIRED": "login.hint_code_expired",
+    "PHONE_CODE_EMPTY": "login.hint_code_empty",
+    "PHONE_NUMBER_INVALID": "login.hint_phone_invalid",
+    "PHONE_NUMBER_BANNED": "login.hint_phone_banned",
+    "PASSWORD_HASH_INVALID": "login.hint_password_invalid",
+    "SESSION_PASSWORD_NEEDED": "login.hint_password_needed",
+    "API_ID_INVALID": "login.hint_api_id_invalid",
+    "API_ID_PUBLISHED_FLOOD": "login.hint_api_id_flood",
+    "AUTH_KEY_DUPLICATED": "login.hint_auth_key_duplicated",
+    "AUTH_KEY_UNREGISTERED": "login.hint_auth_key_unregistered",
 }
 
 
@@ -190,9 +170,9 @@ def _run(cmd: list[str], timeout: int = 60) -> tuple[int, str]:
     try:
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
     except FileNotFoundError:
-        return 127, f"no {cmd[0]} command"
+        return 127, t("init.no_command", cmd=cmd[0])
     except subprocess.TimeoutExpired:
-        return 124, f"{cmd[0]} did not answer in {timeout} s"
+        return 124, t("init.no_answer", cmd=cmd[0], timeout=timeout)
     except OSError as exc:
         return 1, str(exc)
     return done.returncode, (done.stdout + done.stderr).strip()
@@ -354,81 +334,78 @@ def plan(st: dict) -> list[Step]:
     agents_done = all(row["state"] == "same" for row in st["agents"])
     return [
         Step(
-            key="api", title="app keys (api_id/api_hash)",
+            key="api", title=t("init.step_api_title"),
             required=True, done=st["api"],
-            detail="already in .env",
-            cost="without them nothing works: MTProto will not let you in, only the Bot API "
-                 "is left",
+            detail=t("init.step_api_done"),
+            cost=t("init.step_api_cost"),
             fix="uv run tg setup",
         ),
         Step(
-            key="login", title="sign-in to the account",
+            key="login", title=t("init.step_login_title"),
             # An unfinished sign-in leaves login_state.json behind: the session
             # file is already there, there is no authorization in it yet. To
             # count such a step as done means leading the person to the daemon,
             # which will fall over on this session.
             required=True, done=st["session_exists"] and not st["login_pending"],
-            detail=f"session in place: {st['session']}",
-            cost="without the sign-in the daemon has nothing to work with: there is no account",
+            detail=t("init.step_login_done", session=st["session"]),
+            cost=t("init.step_login_cost"),
             fix="uv run tg login",
         ),
         Step(
-            key="bot", title="notification bot",
+            key="bot", title=t("init.step_bot_title"),
             required=False, done=st["bot_token"] and st["alert_chat"],
-            detail="token present, chat_id linked",
-            cost="there will be no alerts about incoming messages, no digest, no tg_ask "
-                 "and no write confirmation",
-            fix="uv run tg setup, then uv run tg link-bot",
+            detail=t("init.step_bot_done"),
+            cost=t("init.step_bot_cost"),
+            fix=t("init.step_bot_fix"),
         ),
         Step(
-            key="memory_key", title="model key for chat dossiers (OPENAI_API_KEY)",
+            key="memory_key", title=t("init.step_memory_key_title"),
             required=False, done=st["openai"],
-            detail="set",
-            cost="tg_memory will not be able to update chat dossiers (reading ready ones — "
-                 "it will)",
-            fix="add OPENAI_API_KEY to .env",
+            detail=t("init.detail_set"),
+            cost=t("init.step_memory_key_cost"),
+            fix=t("setup.add_openai_key"),
         ),
         Step(
-            key="groq", title="Groq key for audio transcripts",
+            key="groq", title=t("init.step_groq_title"),
             required=False, done=st["groq"],
-            detail="set",
-            cost="transcripts will be left only through Telegram Premium or a local model",
-            fix="add GROQ_API_KEY to .env (console.groq.com/keys)",
+            detail=t("init.detail_set"),
+            cost=t("init.step_groq_cost"),
+            fix=t("setup.add_groq_key"),
         ),
         Step(
-            key="local_whisper", title="local transcription model",
+            key="local_whisper", title=t("init.step_local_whisper_title"),
             required=False, done=bool(st["local_whisper"]),
             detail=str(st["local_whisper"]),
-            cost="without it and without Groq only Telegram will transcribe audio, and only "
-                 "with Premium",
+            cost=t("init.step_local_whisper_cost"),
             fix="uv sync --extra local-whisper",
         ),
         Step(
-            key="daemon", title="daemon",
+            key="daemon", title=t("init.step_daemon_title"),
             required=True, done=bool(st["daemon_pid"]),
-            detail=f"running, pid {st['daemon_pid']}",
-            cost="without the daemon not a single tool works: the session belongs to it",
+            detail=t("init.step_daemon_done", pid=st["daemon_pid"]),
+            cost=t("init.step_daemon_cost"),
             fix="uv run tg daemon start",
         ),
         Step(
-            key="mcp", title="registering the server with Claude Code",
+            key="mcp", title=t("init.step_mcp_title"),
             required=False, done=st["mcp"] is True,
-            detail="the telegram server is registered",
-            cost="Claude Code will not see the tools — the server is unknown to it",
+            detail=t("init.step_mcp_done"),
+            cost=t("init.step_mcp_cost"),
             fix=" ".join(mcp_add_command(st["root"])),
         ),
         Step(
-            key="agents", title="subagents in ~/.claude/agents",
+            key="agents", title=t("init.step_agents_title"),
             required=False, done=agents_done,
-            detail="match the repository",
-            cost="there will be no ready-made telegram and telegram-watch subagents",
+            detail=t("init.step_agents_done"),
+            cost=t("init.step_agents_cost"),
             fix=f"cp {st['root']}/agents/*.md {AGENT_DIR}/",
         ),
         Step(
-            key="autostart", title="daemon autostart at system sign-in",
+            key="autostart", title=t("init.step_autostart_title"),
             required=False, done=st["autostart"],
-            detail=f"{st['autostart_target']} installed" if st["autostart_target"] else "",
-            cost="after a reboot the daemon will have to be raised by hand",
+            detail=t("init.step_autostart_done", target=st["autostart_target"])
+            if st["autostart_target"] else "",
+            cost=t("init.step_autostart_cost"),
             fix=autostart_fix(st),
         ),
     ]
@@ -454,10 +431,9 @@ def autostart_fix(st: dict) -> str:
     """
     kind = st.get("autostart_kind")
     if not kind:
-        return "this system has no autostart — keep the daemon in docker (see docs/docker.md)"
-    return (f"copy {st['autostart_template']} into {st['autostart_target'].parent}, "
-            f"substitute your own paths in it and switch it on: "
-            f"{autostart_enable_command(kind)}")
+        return t("init.autostart_none")
+    return t("init.autostart_manual", template=st["autostart_template"],
+             dir=st["autostart_target"].parent, enable=autostart_enable_command(kind))
 
 
 def pending(st: dict) -> list[Step]:
@@ -478,12 +454,14 @@ def explain_login_error(exc: BaseException) -> str | None:
 
     for code in caps.error_codes(exc):
         if code in LOGIN_HINTS:
-            return LOGIN_HINTS[code]
+            return t(LOGIN_HINTS[code])
     return caps.explain_error(exc)
 
 
 # ---------------------------------------------------------------- diagnostics
 
+# Verdicts of a row. These are internal tokens: the owner sees the localized
+# labels that `render` picks for them.
 _OK, _BAD, _SKIP = "ok", "bad", "skip"
 
 
@@ -497,154 +475,149 @@ def report(st: dict) -> list[dict]:
     rows: list[dict] = []
     add = rows.append
 
-    add(_row("root", "installation", _OK, f"project directory: {st['root']}"))
-    add(_row("python", "installation", _OK, f"python {st['python']}"))
+    sec_install = t("doctor.section_install")
+    add(_row("root", sec_install, _OK, t("doctor.root", path=st["root"])))
+    add(_row("python", sec_install, _OK, f"python {st['python']}"))
     add(_row(
-        "uv", "installation",
+        "uv", sec_install,
         _OK if st["uv"] else _BAD,
-        f"uv: {st['uv']}" if st["uv"] else "uv not found in PATH",
-        None if st["uv"]
-        else "install uv: https://docs.astral.sh/uv/ — everything is started with it",
+        f"uv: {st['uv']}" if st["uv"] else t("doctor.uv_missing"),
+        None if st["uv"] else t("doctor.uv_fix"),
     ))
     if st["env_exists"]:
         mode = st["env_mode"]
         open_to_others = bool(mode and mode & 0o077)
         add(_row(
-            "env", "installation", _BAD if open_to_others else _OK,
-            f".env is there, mode {mode:o}" if mode else ".env is there",
-            f"chmod 600 {st['env_file']} — it holds full access to the account"
-            if open_to_others else None,
+            "env", sec_install, _BAD if open_to_others else _OK,
+            t("doctor.env_mode", mode=f"{mode:o}") if mode else t("doctor.env_ok"),
+            t("doctor.env_fix", path=st["env_file"]) if open_to_others else None,
         ))
     else:
         add(_row(
-            "env", "installation", _SKIP if st["api"] else _BAD,
-            "no .env, the values are taken from the environment" if st["api"] else "no .env",
+            "env", sec_install, _SKIP if st["api"] else _BAD,
+            t("doctor.env_from_environment") if st["api"] else t("doctor.env_missing"),
             None if st["api"] else "uv run tg init",
         ))
     mode = st["data_mode"]
     add(_row(
-        "data", "installation",
+        "data", sec_install,
         _BAD if mode and mode & 0o077 else _OK,
-        f"data directory: {st['data']}" + (f", mode {mode:o}" if mode else " (not created yet)"),
-        f"chmod 700 {st['data']} — the session, the index and the dossiers are there"
-        if mode and mode & 0o077 else None,
+        t("doctor.data", path=st["data"])
+        + (t("doctor.data_mode", mode=f"{mode:o}") if mode else t("doctor.data_absent")),
+        t("doctor.data_fix", path=st["data"]) if mode and mode & 0o077 else None,
     ))
 
+    sec_keys = t("doctor.section_keys")
     add(_row(
-        "api", "keys", _OK if st["api"] else _BAD,
-        "api_id/api_hash are set" if st["api"] else "api_id/api_hash are not set",
-        None if st["api"] else "uv run tg init (or uv run tg setup)",
+        "api", sec_keys, _OK if st["api"] else _BAD,
+        t("doctor.api_set") if st["api"] else t("doctor.api_unset"),
+        None if st["api"] else t("doctor.api_fix"),
     ))
     add(_row(
-        "write", "keys", _OK,
-        "writing to the account is allowed" if st["allow_write"]
-        else "writing is off (TG_ALLOW_WRITE=0), the agent only reads",
+        "write", sec_keys, _OK,
+        t("doctor.write_on") if st["allow_write"] else t("doctor.write_off"),
     ))
 
+    sec_accounts = t("doctor.section_accounts")
     if st["accounts"]:
-        add(_row("accounts", "accounts", _OK,
-                 f"signed in: {', '.join(st['accounts'])}; default "
-                 f"{config.default_account()}"))
+        add(_row("accounts", sec_accounts, _OK,
+                 t("doctor.accounts", accounts=", ".join(st["accounts"]),
+                   default=config.default_account())))
     else:
-        add(_row("accounts", "accounts", _BAD, "not a single signed-in account",
+        add(_row("accounts", sec_accounts, _BAD, t("doctor.accounts_none"),
                  "uv run tg login"))
     if st["session_exists"]:
         mode = st["session_mode"]
         add(_row(
-            "session", "accounts",
+            "session", sec_accounts,
             _BAD if mode and mode & 0o077 else _OK,
-            f"session file {st['account']}: mode {mode:o}" if mode
-            else f"session file {st['account']} is in place",
-            f"chmod 600 {st['session']} — this file is itself the sign-in to the account "
-            "without a password and without 2FA" if mode and mode & 0o077 else None,
+            t("doctor.session_mode", account=st["account"], mode=f"{mode:o}") if mode
+            else t("doctor.session_ok", account=st["account"]),
+            t("doctor.session_fix", path=st["session"]) if mode and mode & 0o077 else None,
         ))
     if st["login_pending"]:
-        add(_row("login_pending", "accounts", _BAD,
-                 "the sign-in is not finished: the code was accepted, the cloud password "
-                 "was not entered",
-                 "uv run tg password — the password is typed only by hand, from a live terminal"))
+        add(_row("login_pending", sec_accounts, _BAD,
+                 t("doctor.login_pending"),
+                 t("doctor.login_pending_fix")))
 
+    sec_daemon = t("doctor.section_daemon")
     add(_row(
-        "daemon", "daemon", _OK if st["daemon_pid"] else _BAD,
-        f"running, pid {st['daemon_pid']}" if st["daemon_pid"] else "not running",
+        "daemon", sec_daemon, _OK if st["daemon_pid"] else _BAD,
+        t("doctor.daemon_running", pid=st["daemon_pid"]) if st["daemon_pid"]
+        else t("doctor.daemon_stopped"),
         None if st["daemon_pid"] else "uv run tg daemon start",
     ))
     if st["socket"] and not st["daemon_pid"]:
-        add(_row("socket", "daemon", _BAD, "the socket file is left over from a dead daemon",
+        add(_row("socket", sec_daemon, _BAD, t("doctor.socket_stale"),
                  "uv run tg daemon restart"))
     if "rpc" in st:
         rpc = st["rpc"]
         add(_row(
-            "rpc", "daemon", _OK if rpc.get("ok") else _BAD,
-            f"RPC answers, live sessions: {rpc.get('sessions')}" if rpc.get("ok")
-            else f"RPC does not answer: {rpc.get('error')}",
-            None if rpc.get("ok") else "uv run tg daemon restart, then uv run tg daemon logs",
+            "rpc", sec_daemon, _OK if rpc.get("ok") else _BAD,
+            t("doctor.rpc_ok", sessions=rpc.get("sessions")) if rpc.get("ok")
+            else t("doctor.rpc_bad", error=rpc.get("error")),
+            None if rpc.get("ok") else t("doctor.rpc_fix"),
         ))
 
     if st["claude"]:
         add(_row("claude", "Claude Code", _OK, f"claude: {st['claude']}"))
         add(_row(
             "mcp", "Claude Code", _OK if st["mcp"] else _BAD,
-            f"MCP server {MCP_NAME} is registered" if st["mcp"]
-            else f"MCP server {MCP_NAME} is not registered",
+            t("doctor.mcp_registered", name=MCP_NAME) if st["mcp"]
+            else t("doctor.mcp_missing", name=MCP_NAME),
             None if st["mcp"] else " ".join(mcp_add_command(st["root"])),
         ))
     else:
-        add(_row("claude", "Claude Code", _SKIP, "claude not found in PATH",
-                 "if the client is a different one this is normal; the registration "
-                 "command is printed by uv run tg init"))
+        add(_row("claude", "Claude Code", _SKIP, t("doctor.claude_missing"),
+                 t("doctor.claude_missing_fix")))
     for row in st["agents"]:
         state = row["state"]
         add(_row(
             f"agent:{row['name']}", "Claude Code",
             _OK if state == "same" else _BAD,
             {
-                "same": f"{row['name']}: matches the repository",
-                "differs": f"{row['name']}: differs from the repository",
-                "missing": f"{row['name']}: not installed",
-                "no-source": f"{row['name']}: no source, nothing to install",
+                "same": t("doctor.agent_same", name=row["name"]),
+                "differs": t("doctor.agent_differs", name=row["name"]),
+                "missing": t("doctor.agent_missing", name=row["name"]),
+                "no-source": t("doctor.agent_no_source", name=row["name"]),
             }[state],
             None if state == "same"
-            else ("the installation is incomplete — the subagents live in the repository: "
-                  "git clone https://github.com/draiqw/tg-mcp" if state == "no-source"
-                  else f"uv run tg init — it will ask again and update; by hand: "
-                       f"cp {st['root']}/agents/{row['name']} {row['dst']}"),
+            else (t("doctor.agent_no_source_fix") if state == "no-source"
+                  else t("doctor.agent_fix",
+                         src=f"{st['root']}/agents/{row['name']}", dst=row["dst"])),
         ))
 
+    sec_optional = t("doctor.section_optional")
     add(_row(
-        "bot", "optional",
+        "bot", sec_optional,
         _OK if st["bot_token"] and st["alert_chat"] else _SKIP,
-        "the notification bot is set up" if st["bot_token"] and st["alert_chat"]
-        else ("the bot token is there, chat_id is not linked" if st["bot_token"]
-              else "the notification bot is not set up"),
+        t("doctor.bot_ok") if st["bot_token"] and st["alert_chat"]
+        else (t("doctor.bot_no_chat") if st["bot_token"] else t("doctor.bot_missing")),
         None if st["bot_token"] and st["alert_chat"]
-        else ("uv run tg link-bot — press Start in the chat with the bot" if st["bot_token"]
-              else "uv run tg init: without the bot there are no alerts, no digest and no tg_ask"),
+        else (t("doctor.bot_link_fix") if st["bot_token"] else t("doctor.bot_fix")),
     ))
     add(_row(
-        "openai", "optional", _OK if st["openai"] else _SKIP,
-        "OPENAI_API_KEY is set" if st["openai"]
-        else "OPENAI_API_KEY is not set — chat dossiers are not updated",
-        None if st["openai"] else "add OPENAI_API_KEY to .env",
+        "openai", sec_optional, _OK if st["openai"] else _SKIP,
+        t("doctor.openai_set") if st["openai"] else t("doctor.openai_unset"),
+        None if st["openai"] else t("setup.add_openai_key"),
     ))
     add(_row(
-        "groq", "optional", _OK if st["groq"] else _SKIP,
-        "GROQ_API_KEY is set" if st["groq"] else "GROQ_API_KEY is not set",
-        None if st["groq"] else "add GROQ_API_KEY to .env (console.groq.com/keys)",
+        "groq", sec_optional, _OK if st["groq"] else _SKIP,
+        t("doctor.groq_set") if st["groq"] else t("doctor.groq_unset"),
+        None if st["groq"] else t("setup.add_groq_key"),
     ))
     add(_row(
-        "local_whisper", "optional", _OK if st["local_whisper"] else _SKIP,
-        f"local transcription: {st['local_whisper']}" if st["local_whisper"]
-        else "there is no local transcription model",
+        "local_whisper", sec_optional, _OK if st["local_whisper"] else _SKIP,
+        t("doctor.whisper_ok", what=st["local_whisper"]) if st["local_whisper"]
+        else t("doctor.whisper_missing"),
         None if st["local_whisper"] else "uv sync --extra local-whisper",
     ))
     if st["autostart_kind"]:
         add(_row(
-            "autostart", "optional", _OK if st["autostart"] else _SKIP,
-            f"daemon autostart is installed ({st['autostart_kind']})" if st["autostart"]
-            else f"there is no autostart ({st['autostart_kind']}): after a reboot the daemon "
-                 "has to be raised by hand",
-            None if st["autostart"] else "uv run tg init will offer to install it",
+            "autostart", sec_optional, _OK if st["autostart"] else _SKIP,
+            t("doctor.autostart_ok", kind=st["autostart_kind"]) if st["autostart"]
+            else t("doctor.autostart_missing", kind=st["autostart_kind"]),
+            None if st["autostart"] else t("doctor.autostart_fix"),
         ))
     return rows
 
@@ -652,17 +625,22 @@ def report(st: dict) -> list[dict]:
 def render(rows: list[dict]) -> str:
     """The report as text: by section, with an indent under "what to do"."""
     out: list[str] = []
+    label = {
+        _OK: t("doctor.status_ok"),
+        _BAD: t("doctor.status_bad"),
+        _SKIP: t("doctor.status_skip"),
+    }
     section = None
     for row in rows:
         if row["section"] != section:
             section = row["section"]
             out.append(f"\n{section}")
-        out.append(f"  [{row['status']:5}] {row['text']}")
+        out.append(f"  [{label[row['status']]:5}] {row['text']}")
         if row["fix"]:
             out.append(f"           → {row['fix']}")
     bad = sum(1 for r in rows if r["status"] == _BAD)
     out.append("")
-    out.append("everything is in place" if not bad else f"bad: {bad}")
+    out.append(t("doctor.all_good") if not bad else t("doctor.bad_count", n=bad))
     return "\n".join(out).lstrip("\n")
 
 
@@ -697,10 +675,13 @@ class Wizard:
         answer = input(f"   {prompt} {suffix}: ").strip().lower()
         if not answer:
             return default
-        return answer in ("y", "yes")
+        # The affirmative words come from the catalog: an owner who read the
+        # Russian question answers in Russian, and dropping those words would
+        # break the answer, not the wording.
+        return answer in ("y", "yes") or answer in t("init.yes_words").split()
 
     def skip(self, step: Step) -> None:
-        self.p(f"   Skipped — {step.cost}.")
+        self.p("   " + t("init.skipped", cost=step.cost))
         self.skipped.append(f"{step.title}: {step.fix}")
 
     # --- steps
@@ -708,70 +689,51 @@ class Wizard:
     def step_api(self, step: Step) -> int:
         from . import cli
 
-        self.p("App keys are access to MTProto, that is to the whole account.")
-        self.p("Without them only the Bot API is left: you see just what was written to the")
-        self.p("bot, but not your own chats, history and search.")
-        self.p("Where to get them: https://my.telegram.org → API development tools → create")
-        self.p("an application. Any name will do. The keys go into .env with mode 600.")
+        self.p(t("init.api_intro"))
         if not self.interactive:
-            self.p("There is no terminal, and the keys are typed by hand. Open a terminal and run:")
+            self.p(t("init.needs_terminal_keys"))
             self.p(f"   cd {config.ROOT} && uv run tg init")
             return 1
         values = cli.prompt_api_credentials()
         if not values:
             return 1
         config.write_env(values)
-        self.p(f"   Written to {config.ENV_FILE}")
+        self.p("   " + t("init.written_to", path=config.ENV_FILE))
         return 0
 
     def step_login(self, step: Step) -> int:
         from . import cli
 
         if self.state["login_pending"]:
-            self.p("The sign-in was started earlier and stopped at the 2FA cloud password.")
-            self.p("The password is typed only from a live terminal and is saved nowhere:")
+            self.p(t("init.login_pending"))
             self.p("   uv run tg password")
             return 1
-        self.p("Now comes the sign-in to Telegram. The code arrives in the app itself (not SMS),")
-        self.p("and you type it — the wizard does not request the code, does not fill it in and")
-        self.p("does not store it. If two-step verification is on, it will ask for the cloud")
-        self.p("password: that too is typed by hand and is written down nowhere.")
+        self.p(t("init.login_intro"))
         self.p("")
-        self.p(f"After the sign-in {self.state['session']} will appear — that is full access "
-               "to the account")
-        self.p("without a password and without 2FA. The file must not be copied to other "
-               "machines:")
-        self.p("Telegram will see two copies of one session and revoke it.")
+        self.p(t("init.login_session", session=self.state["session"]))
         self.p("")
         if not self.interactive:
-            self.p("The sign-in needs a terminal. Open a terminal and run:")
+            self.p(t("init.needs_terminal_login"))
             self.p(f"   cd {config.ROOT} && uv run tg init")
             return 1
         try:
             code = cli.cmd_login(argparse.Namespace(account=self.account, brief=True))
         except (KeyboardInterrupt, EOFError):
-            self.p("\n   Sign-in interrupted. To repeat: uv run tg login")
+            self.p("\n   " + t("init.login_interrupted"))
             return 1
         except Exception as exc:
             why = explain_login_error(exc)
-            self.p(f"   Sign-in did not go through: {why or exc}")
+            self.p("   " + t("init.login_failed", why=why or exc))
             return 1
         return code
 
     def step_bot(self, step: Step) -> int:
         from . import cli
 
-        self.p("The bot is needed as a back channel: alerts about important incoming messages,")
-        self.p("the scheduled digest, the agent's questions (tg_ask) and write confirmations")
-        self.p("arrive in it. Start a SEPARATE bot for the agent: @BotFather → /newbot. Somebody")
-        self.p("else's bot cannot be reused — its messages become incoming for you too and")
-        self.p("trigger an alert, which the next alert will answer (the daemon ignores")
-        self.p("only its own bot, known by its token).")
-        self.p("Without the bot everything else works; alerts, the digest and tg_ask just")
-        self.p("silently disappear.")
+        self.p(t("init.bot_intro"))
         if self.state["bot_token"] and not self.state["alert_chat"]:
-            self.p("The token is already there, only chat_id is missing.")
-            if not self.yes("Link it now (you have to press Start at the bot)?", default=True):
+            self.p(t("init.bot_token_only"))
+            if not self.yes(t("init.bot_link_ask"), default=True):
                 self.skip(step)
                 return 0
             return self._link_bot()
@@ -792,9 +754,7 @@ class Wizard:
         from . import cli
 
         if cli.cmd_link_bot(self.args):
-            self.skipped.append(
-                "linking the bot's chat_id: press Start at your bot and run uv run tg link-bot"
-            )
+            self.skipped.append(t("init.bot_link_skipped"))
         return 0
 
     def _optional_key(self, step: Step, name: str, why: str, where: str) -> int:
@@ -802,162 +762,135 @@ class Wizard:
         if not self.interactive:
             self.skip(step)
             return 0
-        self.p(f"Where to get it: {where}")
-        value = getpass(f"   {name} (input hidden, Enter to skip): ").strip()
+        self.p(t("init.where_to_get", where=where))
+        value = getpass("   " + t("init.key_prompt", name=name) + ": ").strip()
         if not value:
             self.skip(step)
             return 0
         config.write_env({name: value})
-        self.p(f"   Written to {config.ENV_FILE}")
+        self.p("   " + t("init.written_to", path=config.ENV_FILE))
         return 0
 
     def step_memory_key(self, step: Step) -> int:
         return self._optional_key(
             step, "OPENAI_API_KEY",
-            "Chat dossiers (tg_memory) are written by a language model — that is the only place\n"
-            "where pieces of the correspondence leave the machine. Without the key the dossiers\n"
-            "simply are not updated, everything else works as before. base_url can later be\n"
-            "pointed at a local model — then the correspondence does not leave the machine\n"
-            "(see .env.example).",
+            t("init.memory_key_why"),
             "platform.openai.com/api-keys",
         )
 
     def step_groq(self, step: Step) -> int:
         return self._optional_key(
             step, "GROQ_API_KEY",
-            "Groq transcribes voice messages, video notes, music and video. Without it what is\n"
-            "left is Telegram's built-in transcription (voice messages and video notes only,\n"
-            "Premium required) and the local model, if it is installed.",
+            t("init.groq_why"),
             "console.groq.com/keys",
         )
 
     def step_local_whisper(self, step: Step) -> int:
-        self.p("The local transcription model works without the internet and without keys, but")
-        self.p("it takes up space and time to install. What gets installed is decided by the")
-        self.p("system: on Apple Silicon it is mlx-whisper, on other hardware faster-whisper.")
-        if not self.yes("Install it now (uv sync --extra local-whisper)?"):
+        self.p(t("init.local_whisper_intro"))
+        if not self.yes(t("init.local_whisper_ask")):
             self.skip(step)
             return 0
         code, out = _run(["uv", "sync", "--extra", "local-whisper"], timeout=900)
         if code:
-            self.p(f"   Did not install: {out.splitlines()[-1] if out else code}")
-            self.p("   This is an optional step, the installation continues.")
+            self.p("   " + t("init.install_failed", why=out.splitlines()[-1] if out else code))
+            self.p("   " + t("init.optional_continue"))
             self.skipped.append(f"{step.title}: {step.fix}")
         return 0
 
     def step_daemon(self, step: Step) -> int:
         from . import cli
 
-        self.p("The daemon owns the Telegram session and does all the work: the MCP server only")
-        self.p("forwards calls to it through a unix socket. Without the daemon the tools do not")
-        self.p("work, and alerts, the digest and reminders do not exist.")
+        self.p(t("init.daemon_intro"))
         code = cli.cmd_daemon_start(self.args)
         if code:
-            self.p("   The daemon did not come up. Common reasons:")
-            self.p("   - the sign-in is not finished: uv run tg password")
-            self.p("   - the daemon is already started by another copy of the project — "
-                   "check: ps ax | grep tgagent")
-            self.p(f"   - a socket file is left over from the previous run: rm {config.SOCKET}")
-            self.p(f"   Full log: uv run tg daemon logs -n 50 ({config.DAEMON_LOG})")
+            self.p("   " + t("init.daemon_failed"))
+            self.p("   - " + t("init.daemon_reason_login"))
+            self.p("   - " + t("init.daemon_reason_running"))
+            self.p("   - " + t("init.daemon_reason_socket", path=config.SOCKET))
+            self.p("   " + t("init.daemon_log", path=config.DAEMON_LOG))
         return code
 
     def step_mcp(self, step: Step) -> int:
         if not claude_bin():
-            self.p("Claude Code (`claude`) is not in PATH — there is nothing to register the "
-                   "server with.")
-            self.p("If the client is a different one (Claude Desktop, your own), set it up "
-                   "by hand:")
+            self.p(t("init.mcp_no_claude"))
             self.p("   " + " ".join(mcp_add_command(config.ROOT)))
-            self.p("   with a config — see docs/mcp.md")
+            self.p("   " + t("init.mcp_by_config"))
             self.skipped.append(f"{step.title}: {step.fix}")
             return 0
         if mcp_registered():
             # The state was taken before the first step, and a lot of time could
             # have passed between them. A second `mcp add` with the same name is
             # a client error, and it would look like a broken wizard.
-            self.p("   The server is already registered — I am not adding it a second time.")
+            self.p("   " + t("init.mcp_already"))
             return 0
         if not uv_bin():
-            self.p("   uv is not found in the PATH of this shell. The command below is "
-                   "started by the client:")
-            self.p("   if uv is not visible to it either, the server will not start — put uv "
-                   "into the common PATH.")
-        self.p("The server has to be declared to the client once: the command and the project")
-        self.p("directory the wizard knows itself. The user scope means the server will be "
-               "available")
-        self.p("in all projects; local would limit it to the current directory.")
+            self.p("   " + t("init.mcp_no_uv"))
+            self.p("   " + t("init.mcp_no_uv_note"))
+        self.p(t("init.mcp_intro"))
         cmd = mcp_add_command(config.ROOT)
         self.p("   " + " ".join(cmd))
         code, out = _run(cmd)
         if code:
-            self.p(f"   It did not work out: {out.splitlines()[-1] if out else code}")
-            self.p("   Run the command above by hand and see what it says.")
+            self.p("   " + t("init.mcp_failed", why=out.splitlines()[-1] if out else code))
+            self.p("   " + t("init.mcp_run_by_hand"))
             self.skipped.append(f"{step.title}: {step.fix}")
             return 0
-        self.p("   Registered. Claude Code reads the servers when a session starts —")
-        self.p("   an already open one will have to be restarted, otherwise it will have no tools.")
+        self.p("   " + t("init.mcp_done"))
+        self.p("   " + t("init.mcp_restart_client"))
         return 0
 
     def step_agents(self, step: Step) -> int:
-        self.p("Subagents are ready-made roles for Claude Code: telegram (all the tools)")
-        self.p("and telegram-watch (a trimmed set for background checks). The client reads them")
-        self.p(f"from {AGENT_DIR}.")
+        self.p(t("init.agents_intro", dir=AGENT_DIR))
 
         def ask(name: str) -> bool:
-            self.p(f"   {name} is already there and differs from the version in the repository.")
-            self.p("   A difference usually means an outdated tool set for the agent,")
-            self.p("   but it may also be your own edit.")
-            return self.yes(f"Overwrite {name}?")
+            self.p("   " + t("init.agent_differs", name=name))
+            self.p("   " + t("init.agent_differs_why"))
+            self.p("   " + t("init.agent_differs_yours"))
+            return self.yes(t("init.agent_overwrite_ask", name=name))
 
         for row in install_agents(ask=ask):
             self.p(f"   {row['name']}: " + {
-                "installed": "installed",
-                "replaced": "updated",
-                "kept": "left as it was",
-                "same": "already up to date",
+                "installed": t("init.agent_installed"),
+                "replaced": t("init.agent_replaced"),
+                "kept": t("init.agent_kept"),
+                "same": t("init.agent_same"),
             }[row["action"]])
             if row["action"] == "kept":
-                self.skipped.append(
-                    f"subagent {row['name']} differs: "
-                    f"cp {config.ROOT}/agents/{row['name']} {AGENT_DIR}/"
-                )
+                self.skipped.append(t(
+                    "init.agent_kept_skipped", name=row["name"],
+                    cmd=f"cp {config.ROOT}/agents/{row['name']} {AGENT_DIR}/",
+                ))
         return 0
 
     def step_autostart(self, step: Step) -> int:
         kind = self.state["autostart_kind"]
         if not kind:
-            self.p("The wizard can install autostart on macOS (launchd) and Linux (systemd);")
-            self.p(f"this system is {sys.platform}. Keep the daemon in docker: there the role "
-                   "of autostart")
-            self.p("is played by restart: unless-stopped — see docs/docker.md.")
+            self.p(t("init.autostart_unsupported", platform=sys.platform))
             self.skipped.append(f"{step.title}: {step.fix}")
             return 0
         target = self.state["autostart_target"]
-        self.p("Autostart raises the daemon at system sign-in so that alerts and")
-        self.p(f"reminders work without Claude running. This is {kind} in")
-        self.p(f"{target.parent}, and it does not require administrator rights.")
-        if not self.yes("Install autostart?"):
+        self.p(t("init.autostart_intro", kind=kind, dir=target.parent))
+        if not self.yes(t("init.autostart_ask")):
             self.skip(step)
             return 0
         uv = uv_bin()
         if not uv:
-            self.p(f"   uv is not found in PATH — {kind} needs an absolute path to it.")
+            self.p("   " + t("init.autostart_no_uv", kind=kind))
             self.skipped.append(f"{step.title}: {step.fix}")
             return 0
         template = self.state["autostart_template"]
         if not template.exists():
-            self.p(f"   There is no template {template} — skipping.")
+            self.p("   " + t("init.autostart_no_template", path=template))
             self.skipped.append(f"{step.title}: {step.fix}")
             return 0
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(render_autostart(template.read_text(), uv, config.ROOT))
         code, out = self._enable_autostart(kind, target)
         if code:
-            self.p(f"   The file is written ({target}), but switching it on did not work "
-                   f"out: {out or code}")
-            self.p(f"   By hand: {autostart_enable_command(kind)}")
+            self.p("   " + t("init.autostart_not_enabled", path=target, why=out or code))
+            self.p("   " + t("init.autostart_by_hand", cmd=autostart_enable_command(kind)))
             return 0
-        self.p(f"   Installed: {target}")
+        self.p("   " + t("init.autostart_installed", path=target))
         return 0
 
     def _enable_autostart(self, kind: str, target: Path) -> tuple[int, str]:
@@ -1003,35 +936,33 @@ class Wizard:
     def run(self) -> int:
         steps = plan(self.state)
         todo = [s for s in steps if not s.done]
-        self.p("Setup wizard. It looks at what is already done and does only what is missing —")
-        self.p('a repeat run breaks nothing and works as "fix my installation".')
-        self.p("Only the app keys and the sign-in are required; the rest is skipped with Enter.")
+        self.p(t("init.wizard_intro"))
         self.p("")
         for s in steps:
-            mark = "done" if s.done else ("required" if s.required else "optional")
+            mark = t("init.mark_done") if s.done else (
+                t("init.mark_required") if s.required else t("init.mark_optional"))
             self.p(f"  [{mark:10}] {s.title}" + (f" — {s.detail}" if s.done and s.detail else ""))
         if not todo:
-            self.p("\nEverything is already set up, there is nothing to change.")
+            self.p("\n" + t("init.nothing_to_do"))
             self.finish()
             return 0
 
         handlers = self.handlers()
         for number, step in enumerate(todo, 1):
             self.p("\n" + "─" * 60)
-            tail = "" if step.required else " (optional, Enter to skip)"
+            tail = "" if step.required else " " + t("init.optional_tail")
             self.p(f"{number}/{len(todo)}. {step.title}{tail}\n")
             try:
                 code = handlers[step.key](step)
             except (KeyboardInterrupt, EOFError):
-                self.p("\nInterrupted. What is already done is saved — run uv run tg init again.")
+                self.p("\n" + t("init.interrupted"))
                 return 1
             except Exception as exc:
                 why = explain_login_error(exc)
-                self.p(f"   The step did not pass: {why or exc}")
+                self.p("   " + t("init.step_failed", why=why or exc))
                 code = 1 if step.required else 0
             if code and step.required:
-                self.p("\nWithout this step you cannot go on. "
-                       "Fix it and run the wizard again: uv run tg init")
+                self.p("\n" + t("init.required_step_failed"))
                 return 1
             # The state is recomputed after every step: the next step may depend
             # on the previous one (the daemon needs the keys, MCP a working daemon).
@@ -1043,13 +974,13 @@ class Wizard:
         from . import cli
 
         self.p("\n" + "─" * 60)
-        self.p("Done. What is available now:\n")
+        self.p(t("init.finish") + "\n")
         self.p(cli.capabilities_text(self.account))
         if self.skipped:
-            self.p("\nSkipped (and how to switch it on if needed):")
+            self.p("\n" + t("init.skipped_list"))
             for line in self.skipped:
                 self.p(f"  - {line}")
-        self.p("\nTo check the whole installation: uv run tg doctor")
+        self.p("\n" + t("init.check_all"))
 
 
 def cmd_init(args) -> int:
@@ -1071,7 +1002,6 @@ def cmd_doctor(args) -> int:
     rows = report(st)
     print(render(rows), flush=True)
     if any(r["status"] == _BAD for r in rows):
-        print("\nmost of this is fixed by the wizard: uv run tg init", flush=True)
-    print("\nThe report has no keys, no phone number and no account name — it can be "
-          "attached to an issue as is.", flush=True)
+        print("\n" + t("doctor.fix_hint"), flush=True)
+    print("\n" + t("doctor.no_secrets"), flush=True)
     return 0

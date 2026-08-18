@@ -151,6 +151,12 @@ uv run tg call whoami             # a live RPC bypassing MCP
 registered and whether the subagents in `~/.claude/agents` match the repository. There
 are no secrets in its output — it is meant to be attached to an issue in full.
 
+Everything `tg` prints, `tg doctor` included, is written in the language set by
+`TG_LANG` in `.env` (`en` by default, `ru` also available; the value is read on every
+call, so an edit takes effect without restarting the daemon). It only affects text
+addressed to the owner: logs, errors returned to Claude and this documentation stay
+English regardless. The table below quotes the English wording.
+
 | Symptom | Cause |
 |---|---|
 | `Telegram daemon is not responding` | the daemon is not up: `uv run tg daemon start` (in docker `docker compose up -d`) |

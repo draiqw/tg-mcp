@@ -31,6 +31,7 @@ from .core import SAVED_ALIASES, GuardError, TelegramService, entity_name
 from .core import _parse_since as parse_since
 from .core import _parse_when as parse_when
 from .core import reaction_of as core_reaction_of
+from .i18n import t
 
 MAX_EVENT_LOG_BYTES = 20 * 1024 * 1024
 REMINDER_TICK_SEC = 30
@@ -614,11 +615,12 @@ class Daemon:
         }
 
     async def fire_reminder(self, rem: dict) -> None:
-        why = f"due {parse_when(rem['at']).astimezone().strftime('%H:%M %d.%m')}"
+        at = parse_when(rem["at"]).astimezone().strftime("%H:%M %d.%m")
+        why = t("reminder.due", at=at)
         if rem.get("unless_reply"):
-            why += f", and no reply from “{rem.get('chat')}” ever came"
+            why += t("reminder.no_reply", chat=rem.get("chat"))
         await self.bot.send(
-            f"<b>Reminder</b>\n\n{html.escape(str(rem['text'])[:1000])}\n\n"
+            f"<b>{t('reminder.title')}</b>\n\n{html.escape(str(rem['text'])[:1000])}\n\n"
             f"<i>{html.escape(why)}</i>"
         )
 
@@ -814,11 +816,11 @@ class Daemon:
         text = (ev.get("text") or "").lower()
         for kw in r.get("keywords", []):
             if kw and str(kw).lower() in text:
-                return f"word “{kw}”"
+                return t("digest.hit_keyword", word=kw)
         if self._chat_matches(
             r.get("watch_chats", []), ev["chat_id"], ev.get("chat", ""), account
         ):
-            return "watched chat"
+            return t("digest.hit_watched")
         return None
 
     async def build_digest(self, since: datetime, until: datetime) -> str | None:
@@ -861,22 +863,22 @@ class Daemon:
             f"{since.astimezone().strftime('%d.%m %H:%M')}"
             f" — {until.strftime('%d.%m %H:%M')}"
         )
-        lines = [f"<b>Digest</b> · {html.escape(period)}", ""]
-        lines.append(f"Chats: {len(counts)} · messages: {len(msgs)}")
+        lines = [f"<b>{t('digest.title')}</b> · {html.escape(period)}", ""]
+        lines.append(t("digest.counts", chats=len(counts), messages=len(msgs)))
         if reactions:
-            lines.append(f"Reactions to your messages: {reactions}")
+            lines.append(t("digest.reactions", count=reactions))
         if auto_fired:
-            lines.append(f"Filters fired: {auto_fired}")
+            lines.append(t("digest.filters_fired", count=auto_fired))
         if unread_chats:
-            lines.append(f"Unread: {unread_total} in {unread_chats} chats")
+            lines.append(t("digest.unread", total=unread_total, chats=unread_chats))
         if counts:
-            lines += ["", "<b>Most of all</b>"]
+            lines += ["", f"<b>{t('digest.top')}</b>"]
             lines += [
                 f"· {html.escape(name)} — {n}"
                 for name, n in counts.most_common(DIGEST_TOP_CHATS)
             ]
         if highlights:
-            lines += ["", "<b>By rules</b>"]
+            lines += ["", f"<b>{t('digest.by_rules')}</b>"]
             for hit, ev in highlights[-DIGEST_HIGHLIGHTS:]:
                 who = html.escape(ev.get("from") or "?")
                 head = f"· {html.escape(ev.get('chat') or '?')} · {who} <i>({html.escape(hit)})</i>"
@@ -1032,7 +1034,7 @@ class Daemon:
         if not self.bot.configured:
             raise RuntimeError("the bot is not configured: tg setup + tg link-bot")
         timeout = max(10, min(int(timeout), 3600))
-        opts = [str(o)[:60] for o in (options or ["yes", "no"])][:6]
+        opts = [str(o)[:60] for o in (options or [t("confirm.yes"), t("confirm.no")])][:6]
         self._question_seq += 1
         qid = f"q{self._question_seq}"
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
@@ -1046,7 +1048,7 @@ class Daemon:
         await self.bot.call(
             "sendMessage",
             chat_id=self.bot.chat_id,
-            text=f"<b>A question from the agent</b>\n\n{html.escape(str(question)[:800])}",
+            text=f"<b>{t('confirm.ask_title')}</b>\n\n{html.escape(str(question)[:800])}",
             parse_mode="HTML",
             reply_markup=keyboard,
         )
@@ -1120,7 +1122,7 @@ class Daemon:
         except Exception:
             return where   # ambiguity and typos are the method's own business
         if ent == "me":
-            return {**where, "saved": True, "name": "Saved Messages"}
+            return {**where, "saved": True, "name": t("confirm.saved_messages")}
         try:
             obj = await svc.client.get_entity(ent)
             where.update(id=utils.get_peer_id(obj), name=entity_name(obj))
@@ -1157,13 +1159,13 @@ class Daemon:
     def _confirm_question(self, method: str, account: str, where: dict, params: dict) -> str:
         """The question to the owner: what exactly will go out, not just "allow a
         write?"."""
-        lines = [f"The agent wants: {method}"]
+        lines = [t("confirm.wants", method=method)]
         if account != config.MAIN_ACCOUNT:
-            lines.append(f"account: {account}")
+            lines.append(t("confirm.account", account=account))
         target = where["name"] or (str(where["raw"]) if where["raw"] is not None else None)
         if target:
             suffix = f" (id {where['id']})" if where["id"] is not None else ""
-            lines.append(f"chat: {target[:80]}{suffix}")
+            lines.append(t("confirm.chat", chat=f"{target[:80]}{suffix}"))
         for key in ("text", "caption", "question", "title"):
             body = params.get(key)
             if isinstance(body, str) and body.strip():
@@ -1176,7 +1178,8 @@ class Daemon:
                          "text", "caption", "question", "title")
         }
         if rest:
-            lines.append("more: " + json.dumps(rest, ensure_ascii=False, default=str)[:200])
+            more = json.dumps(rest, ensure_ascii=False, default=str)[:200]
+            lines.append(t("confirm.more", rest=more))
         return "\n".join(lines)
 
     async def confirm_write(self, svc: TelegramService, method: str, params: dict) -> None:
@@ -1212,7 +1215,7 @@ class Daemon:
         timeout = max(10, min(int(settings.get("confirm_timeout_sec") or 90), 110))
         reply = await self.ask(
             self._confirm_question(method, svc.account, where, params),
-            options=["allow", "deny"],
+            options=[t("confirm.allow"), t("confirm.deny")],
             timeout=timeout,
         )
         if not reply.get("answered"):
@@ -1221,7 +1224,9 @@ class Daemon:
                 "Silence counts as a refusal, the action was not carried out."
             )
         answer = str(reply.get("answer") or "").strip().lower()
-        if answer not in CONFIRM_YES:
+        # The button labels are in the owner's language, so whatever "allow" reads
+        # as counts as a yes on top of the handful of words people type by hand.
+        if answer not in CONFIRM_YES and answer != t("confirm.allow").strip().lower():
             raise GuardError(
                 f"the owner did not confirm: answered {answer!r}. "
                 "The action was not carried out."
@@ -1364,7 +1369,10 @@ class Daemon:
             await self.bot.call(
                 "answerCallbackQuery",
                 callback_query_id=cb.get("id"),
-                text=f"Taken: {answer}" if answer else "This question is no longer current",
+                text=(
+                    t("bot.answer_taken", answer=answer) if answer
+                    else t("bot.question_stale")
+                ),
             )
         except Exception as exc:
             log(f"bot: answerCallbackQuery failed: {exc}")
@@ -1375,13 +1383,17 @@ class Daemon:
         arg = arg.strip()
         try:
             if cmd in ("start", "help"):
-                await self.bot.send(HELP_TEXT, chat_id)
+                await self.bot.send(t("bot.help"), chat_id)
             elif cmd == "status":
                 st = await self.status()
                 await self.bot.send(
-                    f"<b>Status</b>\nAccount: {st['account']['name']}\n"
-                    f"Uptime: {st['uptime_min']} min\nAlerts: {st['alerts_sent']}\n"
-                    f"Rules: {'paused' if self.paused else 'active'}",
+                    t(
+                        "bot.status",
+                        account=st["account"]["name"],
+                        uptime=st["uptime_min"],
+                        alerts=st["alerts_sent"],
+                        rules=t("bot.rules_paused") if self.paused else t("bot.rules_active"),
+                    ),
                     chat_id,
                 )
             elif cmd in ("can", "capabilities"):
@@ -1392,7 +1404,7 @@ class Daemon:
             elif cmd == "unread":
                 rows = await self.tg.unread_summary(limit_chats=10, per_chat=2)
                 if not rows:
-                    await self.bot.send("Nothing unread.", chat_id)
+                    await self.bot.send(t("bot.no_unread"), chat_id)
                 else:
                     parts = [
                         f"<b>{r['chat']}</b> ({r['unread']})\n"
@@ -1403,7 +1415,7 @@ class Daemon:
             elif cmd == "actions":
                 rows = await self.get_actions(limit=10)
                 if not rows:
-                    await self.bot.send("The agent did nothing.", chat_id)
+                    await self.bot.send(t("bot.no_actions"), chat_id)
                 else:
                     lines = []
                     for r in reversed(rows):   # newest first: this is a digest, not a log
@@ -1413,31 +1425,34 @@ class Daemon:
                         if target:
                             head += f" · {html.escape(str(target)[:40])}"
                         if not r.get("ok"):
-                            head += f" · error: {html.escape(str(r.get('error'))[:80])}"
+                            why = html.escape(str(r.get("error"))[:80])
+                            head += " · " + t("bot.action_failed", error=why)
                         body = (r.get("text") or "")[:100]
                         lines.append(head + (f"\n{html.escape(body)}" if body else ""))
-                    await self.bot.send("<b>Recent actions</b>\n\n" + "\n".join(lines), chat_id)
+                    await self.bot.send(
+                        f"<b>{t('bot.actions_title')}</b>\n\n" + "\n".join(lines), chat_id
+                    )
             elif cmd == "pause":
                 self.paused = True
-                await self.bot.send("Alerts are paused. /resume to bring them back.", chat_id)
+                await self.bot.send(t("bot.paused"), chat_id)
             elif cmd == "resume":
                 self.paused = False
-                await self.bot.send("Alerts are active again.", chat_id)
+                await self.bot.send(t("bot.resumed"), chat_id)
             elif cmd == "rules":
                 dump = json.dumps(self.rules_view(), ensure_ascii=False, indent=2)
                 await self.bot.send("<pre>" + dump + "</pre>", chat_id)
             elif cmd == "mute" and arg:
                 self.rules.setdefault("mute_chats", []).append(arg)
                 config.save_rules(self.rules)
-                await self.bot.send(f"No more alerts about: {arg}", chat_id)
+                await self.bot.send(t("bot.muted", chat=arg), chat_id)
             elif cmd == "watch" and arg:
                 self.rules.setdefault("watch_chats", []).append(arg)
                 config.save_rules(self.rules)
-                await self.bot.send(f"Watching: {arg}", chat_id)
+                await self.bot.send(t("bot.watching", chat=arg), chat_id)
             else:
-                await self.bot.send(HELP_TEXT, chat_id)
+                await self.bot.send(t("bot.help"), chat_id)
         except Exception as exc:
-            await self.bot.send(f"Error: {exc}", chat_id)
+            await self.bot.send(t("bot.error", error=exc), chat_id)
 
     # ---------- accounts ----------
 
@@ -1871,7 +1886,7 @@ class Daemon:
         # a traceback and carries the command that finishes the setup off.
         hint = config.setup_hint()
         if hint or not labels:
-            raise config.SetupError(hint or "There is no Telegram session at all.")
+            raise config.SetupError(hint or t("daemon.no_sessions"))
         wanted = config.default_account()
         for label in labels:
             svc = TelegramService(label)
@@ -1925,7 +1940,7 @@ class Daemon:
         memory_task = asyncio.create_task(self.memory_loop())
         if self.bot.configured:
             try:
-                await self.bot.send("The agent is connected to Telegram. /help — what I can do.")
+                await self.bot.send(t("daemon.connected"))
             except Exception as exc:
                 log(f"bot: startup ping failed: {exc}")
 
@@ -2006,19 +2021,10 @@ CONFIRM_CONDITIONAL = {
 }
 
 CONFIRM_PREVIEW_LEN = 350
+# Words typed by hand instead of pressing the button. The label of the "allow"
+# button itself is added to these at the point of the check: it is localized, and
+# a set frozen at import time would not know the owner's language.
 CONFIRM_YES = {"allow", "yes", "y", "ok", "okay", "+", "go", "go ahead", "do it"}
-
-HELP_TEXT = (
-    "<b>Telegram agent</b>\n"
-    "/status — state\n"
-    "/can — what the agent can reach and what is missing\n"
-    "/unread — unread\n"
-    "/actions — what the agent did\n"
-    "/rules — current alert rules\n"
-    "/watch &lt;chat&gt; — alert on every message of a chat\n"
-    "/mute &lt;chat&gt; — do not alert about a chat\n"
-    "/pause, /resume — switch alerts off/on"
-)
 
 
 def main() -> None:

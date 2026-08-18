@@ -40,6 +40,17 @@ All the checks sit in the core and in the daemon, that is, below the model. The
 agent cannot talk its way around them and cannot raise its own limits through
 MCP — `LIMITS` is edited by file only.
 
+`TG_LANG` (`en` | `ru`, default `en`) changes nothing in this picture. It picks
+the language of text addressed to the owner only: setup hints, the `tg init`
+wizard, `tg doctor`, everything `tg` prints, and alerts, digests, reminders and
+questions delivered through the bot. Logs, errors returned to Claude and all
+documentation are always English, so what you read in an audit trail or a
+traceback does not depend on the setting. The value is read on every call, so
+editing `.env` takes effect without restarting the daemon; values like
+`ru_RU.UTF-8` or `en-GB` are understood, and an unsupported language falls back
+to `en`. The catalog holding both languages side by side lives in
+`tgagent/i18n.py` and is checked for gaps by `scripts/selfcheck.py`.
+
 ### Write confirmation
 
 `confirm_writes` in `data/rules.json` is the middle mode between "read only" and

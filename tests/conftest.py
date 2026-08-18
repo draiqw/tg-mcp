@@ -8,7 +8,8 @@ the real .env. That rests on two levels, and both are needed:
    them later is too late: `TG_ENV_FILE` sends the .env load to a file that does
    not exist (otherwise the owner's keys would end up in the environment of the
    test process), and `TG_DATA_DIR` sends every path into a directory under the
-   temporary directory.
+   temporary directory. `TG_LANG` is fixed there too, so the suite asserts one
+   language whatever the developer keeps in their own .env.
 2. The autouse `data_dir` fixture re-points the already computed attributes of
    the module at `tmp_path` — its own folder for every test. One environment
    variable is not enough for that: the constants are computed once, at import.
@@ -47,6 +48,9 @@ os.environ["TG_ENV_FILE"] = str(_SANDBOX / "absent.env")   # no such file, ever
 os.environ["TG_DATA_DIR"] = str(_SANDBOX / "data")
 os.environ["TG_API_ID"] = "1"
 os.environ["TG_API_HASH"] = "0" * 32
+# One language for the whole suite: the expected texts are asserted as English
+# literals, and the owner's TG_LANG must not decide which of them the code says.
+os.environ["TG_LANG"] = "en"
 
 from telethon.tl import types  # noqa: E402 — only after the environment above
 
@@ -80,6 +84,9 @@ def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root.mkdir()
     assert root != config.ROOT / "data"
     monkeypatch.setenv("TG_DATA_DIR", str(root))
+    # The language is pinned per test as well: a test that switches TG_LANG must
+    # not leave the next one asserting English against Russian output.
+    monkeypatch.setenv("TG_LANG", "en")
     monkeypatch.setattr(config, "DATA", root)
     for attr, name in _PATHS.items():
         monkeypatch.setattr(config, attr, root / name)
@@ -175,8 +182,8 @@ class FakeService:
 
     async def resolve(self, chat: Any) -> Any:
         # "избранное" is Cyrillic here for the same reason as in
-        # core.SAVED_ALIASES: an alias is input, and the owner types it on
-        # their own keyboard.
+        # core.SAVED_ALIASES: an alias is input, and what the owner types on
+        # their keyboard does not depend on TG_LANG.
         if str(chat).strip().lower() in ("me", "self", "saved", "избранное"):
             return "me"
         return self.entities.get(chat, chat)

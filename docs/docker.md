@@ -58,6 +58,15 @@ that is on the volume, not in `.env`. So `docker compose restart` picks them up 
 the rest of the state, and editing `confirm_*` takes effect immediately — the daemon
 re-reads those keys from disk on every writing call.
 
+One environment variable is new: `TG_LANG` (`en` or `ru`, default `en`). It selects the
+language of text addressed to the owner only — setup hints, the `tg init` wizard, `tg
+doctor`, everything `tg` prints, and the alerts, digests, reminders and questions delivered
+through the bot. Logs, errors returned to Claude and all documentation stay English. The
+value is read on every call, so editing `.env` takes effect without restarting the daemon —
+`docker compose restart` is not required, though the container must have been started with
+the variable present for `docker compose` to pass it through. Values like `ru_RU.UTF-8` or
+`en-GB` are understood; an unsupported language falls back to `en`.
+
 ## Permissions
 
 The container runs as root so that it can read session files with mode 600 created by your

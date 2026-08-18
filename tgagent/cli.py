@@ -18,6 +18,7 @@ from getpass import getpass
 from pathlib import Path
 
 from . import config
+from .i18n import t
 
 
 def _p(msg: str = "") -> None:
@@ -47,38 +48,37 @@ def prompt_api_credentials(head: str = "api_id / api_hash") -> dict[str, str] | 
     question: two copies of one question would drift apart in both the text and
     the check.
     """
-    _p(f"{head}: https://my.telegram.org → API development tools")
+    _p(t("setup.api_where", head=head))
     api_id = input("   TG_API_ID: ").strip()
-    api_hash = getpass("   TG_API_HASH (hidden input): ").strip()
+    api_hash = getpass(t("setup.api_hash_prompt")).strip()
     if not api_id.isdigit() or len(api_hash) < 20:
-        _p("   api_id must be a number, api_hash a long string. Aborted.")
+        _p(t("setup.api_bad_format"))
         return None
     return {"TG_API_ID": api_id, "TG_API_HASH": api_hash}
 
 
-def prompt_bot_token(head: str = "notification bot") -> str:
+def prompt_bot_token(head: str | None = None) -> str:
     """Bot token, or an empty string if the bot was not wanted."""
-    _p(f"{head}: @BotFather → /newbot → copy the token")
-    return getpass("   TG_BOT_TOKEN (hidden input, Enter to skip): ").strip()
+    _p(t("setup.bot_where", head=head or t("setup.bot_head")))
+    return getpass(t("setup.bot_token_prompt")).strip()
 
 
 def cmd_setup(args) -> int:
-    _p("Telegram agent setup. Values are written to .env (chmod 600), "
-       "nothing leaves the machine.\n")
+    _p(t("setup.intro"))
     creds = prompt_api_credentials("1) api_id / api_hash")
     if not creds:
         return 1
 
-    bot_token = prompt_bot_token("\n2) notification bot")
+    bot_token = prompt_bot_token(t("setup.step_bot"))
 
     values = {**creds, "TG_ALLOW_WRITE": "1"}
     if bot_token:
         values["TG_BOT_TOKEN"] = bot_token
     config.write_env(values)
-    _p(f"\n   Written to {config.ENV_FILE}")
+    _p(t("setup.written", path=config.ENV_FILE))
 
     code = asyncio.run(_link_bot(bot_token)) if bot_token else 0
-    _onboarding("What is set up so far")
+    _onboarding(t("setup.onboarding_title"))
     return code
 
 
@@ -88,9 +88,8 @@ async def _link_bot(token: str) -> int:
     bot = BotChannel(token=token, chat_id=None)
     try:
         me = await bot.me()
-        _p(f"   Bot confirmed: @{me['username']}")
-        _p(f"\n3) Open https://t.me/{me['username']} and press Start "
-           "(waiting up to 120 seconds)...")
+        _p(t("setup.bot_confirmed", username=me["username"]))
+        _p(t("setup.bot_start", username=me["username"]))
         deadline = time.time() + 120
         chat_id = None
         while time.time() < deadline and not chat_id:
@@ -101,11 +100,11 @@ async def _link_bot(token: str) -> int:
                     chat_id = str(cid)
                     break
         if not chat_id:
-            _p("   Gave up waiting. Press Start and run `uv run tg link-bot`.")
+            _p(t("setup.bot_not_started"))
             return 1
         config.write_env({"TG_ALERT_CHAT_ID": chat_id})
-        await bot.send("Alert channel connected.", chat_id)
-        _p(f"   Done: alerts will go to chat_id {chat_id}")
+        await bot.send(t("setup.alert_channel_linked"), chat_id)
+        _p(t("setup.bot_linked", chat_id=chat_id))
         return 0
     finally:
         await bot.close()
@@ -114,7 +113,7 @@ async def _link_bot(token: str) -> int:
 def cmd_link_bot(args) -> int:
     token = config.bot_token()
     if not token:
-        _p("TG_BOT_TOKEN is not set — run `uv run tg setup`.")
+        _p(t("setup.bot_token_missing"))
         return 1
     return asyncio.run(_link_bot(token))
 
@@ -130,8 +129,7 @@ def cmd_login(args) -> int:
     try:
         return asyncio.run(_login(args))
     except (KeyboardInterrupt, EOFError):
-        _p("\nSign-in interrupted, nothing was saved. Retry: "
-           + config.login_command(getattr(args, "account", None)))
+        _p(t("login.aborted", command=config.login_command(getattr(args, "account", None))))
         return 1
 
 
@@ -170,10 +168,10 @@ async def _login(args) -> int:
     brief = getattr(args, "brief", False)
     if await client.is_user_authorized():
         me = await client.get_me()
-        _p(f"Already signed in: {me.first_name} (@{me.username}). The session is in place.")
+        _p(t("login.already", name=me.first_name, username=me.username))
         await client.disconnect()
         if not brief:
-            _onboarding("What you can do", getattr(args, "account", None))
+            _onboarding(t("login.onboarding_title"), getattr(args, "account", None))
         return 0
 
     signed_in = False
@@ -182,14 +180,14 @@ async def _login(args) -> int:
         # this is a one-off sign-in from a terminal, nothing else spins in this
         # process, and waiting is exactly what we owe the person — asyncio has no
         # async replacement for input().
-        phone = input("Phone in +79991234567 format: ").strip()  # noqa: ASYNC250 — waiting for a human
+        phone = input(t("login.phone_prompt")).strip()  # noqa: ASYNC250 — waiting for a human
         sent = await client.send_code_request(phone)
-        _p("Code sent to Telegram (not SMS — check the app).")
-        code = input("Code: ").strip()  # noqa: ASYNC250 — waiting for a human
+        _p(t("login.code_sent"))
+        code = input(t("login.code_prompt")).strip()  # noqa: ASYNC250 — waiting for a human
         try:
             await client.sign_in(phone, code, phone_code_hash=sent.phone_code_hash)
         except SessionPasswordNeededError:
-            pwd = getpass("Two-factor password (hidden input): ")
+            pwd = getpass(t("login.password_prompt"))
             await client.sign_in(password=pwd)
         signed_in = True
         me = await client.get_me()
@@ -199,15 +197,16 @@ async def _login(args) -> int:
             session_file.unlink(missing_ok=True)
 
     session_file.chmod(0o600)
-    _p(f"\nDone: signed in as {me.first_name} (@{me.username}, id {me.id}).")
-    _p("Session: " + str(session_file))
+    _p(t("login.done", name=me.first_name, username=me.username, user_id=me.id))
+    _p(t("login.session_file", path=session_file))
     # The account tier is known right here: it is a flag of the user who has just
     # signed in, no extra request is needed for it. The caps that follow from it
     # are shown by `tg capabilities` — those need a running daemon.
-    _p("Telegram Premium: " + ("yes" if getattr(me, "premium", False) else "no"))
+    _p(t("login.premium",
+         value=t("login.premium_yes") if getattr(me, "premium", False) else t("login.premium_no")))
     if not brief:
-        _p("Next: uv run tg daemon start")
-        _onboarding("What you can do", getattr(args, "account", None))
+        _p(t("login.next_daemon"))
+        _onboarding(t("login.onboarding_title"), getattr(args, "account", None))
     return 0
 
 
@@ -233,7 +232,7 @@ def cmd_send_code(args) -> int:
         await client.connect()
         if await client.is_user_authorized():
             me = await client.get_me()
-            _p(f"Already signed in as {me.first_name} (@{me.username}).")
+            _p(t("login.already_short", name=me.first_name, username=me.username))
             await client.disconnect()
             return 0
         sent = await client.send_code_request(args.phone)
@@ -242,8 +241,7 @@ def cmd_send_code(args) -> int:
         )
         login_state(getattr(args, "account", None)).chmod(0o600)
         await client.disconnect()
-        _p(f"Code sent to {args.phone} (to the Telegram app). "
-           "Next: tg sign-in --code XXXXX")
+        _p(t("login.code_sent_to", phone=args.phone))
         return 0
 
     return asyncio.run(_run())
@@ -257,7 +255,7 @@ def cmd_sign_in(args) -> int:
         from telethon.errors import SessionPasswordNeededError
 
         if not login_state(getattr(args, "account", None)).exists():
-            _p("Run tg send-code <phone> first.")
+            _p(t("login.need_send_code"))
             return 1
         state = json.loads(login_state(getattr(args, "account", None)).read_text())
         api_id, api_hash = config.api_credentials()
@@ -269,7 +267,7 @@ def cmd_sign_in(args) -> int:
         try:
             await client.sign_in(state["phone"], args.code, phone_code_hash=state["hash"])
         except SessionPasswordNeededError:
-            pwd = args.password or getpass("2FA password (hidden input): ")
+            pwd = args.password or getpass(t("login.password_2fa_prompt"))
             await client.sign_in(password=pwd)
         me = await client.get_me()
         await client.disconnect()
@@ -277,7 +275,7 @@ def cmd_sign_in(args) -> int:
         session_file = Path(str(config.session_path(getattr(args, "account", None))) + ".session")
         if session_file.exists():
             session_file.chmod(0o600)
-        _p(f"Signed in as {me.first_name} (@{me.username}, id {me.id}).")
+        _p(t("login.signed_in", name=me.first_name, username=me.username, user_id=me.id))
         return 0
 
     return asyncio.run(_run())
@@ -294,8 +292,7 @@ def cmd_password(args) -> int:
         from telethon import TelegramClient
 
         if not sys.stdin.isatty():
-            _p("A real terminal is required: open a terminal and run there\n"
-               f"  cd {config.ROOT} && uv run tg password")
+            _p(t("login.need_tty", root=config.ROOT))
             return 1
 
         api_id, api_hash = config.api_credentials()
@@ -306,7 +303,7 @@ def cmd_password(args) -> int:
         await client.connect()
         if await client.is_user_authorized():
             me = await client.get_me()
-            _p(f"Already signed in as {me.first_name} (@{me.username}).")
+            _p(t("login.already_short", name=me.first_name, username=me.username))
             await client.disconnect()
             return 0
         from telethon import functions
@@ -314,24 +311,20 @@ def cmd_password(args) -> int:
 
         info = await client(functions.account.GetPasswordRequest())
         if info.hint:
-            _p(f"Telegram password hint: {info.hint}")
-        _p("This is the Telegram cloud password for two-step verification "
-           "(Settings → Privacy and Security → Two-Step Verification),\n"
-           "not the password of your Apple ID, your mail, or a code from an SMS.\n")
+            _p(t("login.password_hint", hint=info.hint))
+        _p(t("login.password_explain"))
 
         me = None
         for attempt in range(1, 4):
-            pwd = getpass(f"Cloud 2FA password (attempt {attempt}/3, hidden input): ")
+            pwd = getpass(t("login.cloud_password_prompt", attempt=attempt))
             try:
                 await client.sign_in(password=pwd)
                 me = await client.get_me()
                 break
             except PasswordHashInvalidError:
-                _p("Wrong password.")
+                _p(t("login.password_wrong"))
         if me is None:
-            _p("\nNot signed in. If the password is forgotten — reset it in the Telegram app:\n"
-               "Settings → Privacy and Security → Two-Step Verification → Forgot password,\n"
-               "then repeat: uv run tg send-code <your number>")
+            _p(t("login.password_failed"))
             await client.disconnect()
             return 1
         await client.disconnect()
@@ -339,8 +332,8 @@ def cmd_password(args) -> int:
         session_file = Path(str(config.session_path(getattr(args, "account", None))) + ".session")
         if session_file.exists():
             session_file.chmod(0o600)
-        _p(f"Signed in as {me.first_name} (@{me.username}, id {me.id}).")
-        _p("Next: uv run tg daemon start")
+        _p(t("login.signed_in", name=me.first_name, username=me.username, user_id=me.id))
+        _p(t("login.next_daemon"))
         return 0
 
     return asyncio.run(_run())
@@ -356,12 +349,12 @@ def cmd_logout(args) -> int:
         await client.connect()
         if await client.is_user_authorized():
             await client.log_out()
-            _p("Session revoked on the Telegram side.")
+            _p(t("account.session_revoked"))
         await client.disconnect()
         base = config.session_path(getattr(args, "account", None))
         for suffix in (".session", ".session-journal"):
             Path(str(base) + suffix).unlink(missing_ok=True)
-        _p("Local session files deleted.")
+        _p(t("account.session_files_removed"))
         # A default pointing at a deleted account is a refusal on every next
         # call. We return it to the main one right here, instead of leaving the
         # owner to deal with an error whose cause they have already forgotten.
@@ -369,12 +362,12 @@ def cmd_logout(args) -> int:
         if config.default_account() == label:
             config.set_default_account(config.MAIN_ACCOUNT)
             if label != config.MAIN_ACCOUNT:
-                _p("It was the default account — the default is back to main.")
+                _p(t("account.default_reset_to_main"))
         # The index and the dossiers stay: they survive a re-login, and wiping
         # them silently along with the session is not allowed — this is
         # correspondence, not a service file.
-        _p(f"The index and dossiers of this account are untouched: {config.index_path(label)}, "
-           f"{config.memory_dir(label)}")
+        _p(t("account.index_kept",
+             index=config.index_path(label), memory=config.memory_dir(label)))
         return 0
 
     cmd_daemon_stop(args)
@@ -397,7 +390,7 @@ def _daemon_pid() -> int | None:
 
 def cmd_daemon_start(args) -> int:
     if _daemon_pid():
-        _p(f"The daemon is already running (pid {_daemon_pid()}).")
+        _p(t("daemon.already_running", pid=_daemon_pid()))
         return 0
     # Checked before the start, not after: without keys and without a session the
     # daemon is guaranteed to die, and without the check the person would wait 18
@@ -417,10 +410,10 @@ def cmd_daemon_start(args) -> int:
         )
     for _ in range(60):
         if config.SOCKET.exists():
-            _p(f"Daemon started (pid {_daemon_pid()}). Log: {config.DAEMON_LOG}")
+            _p(t("daemon.started", pid=_daemon_pid(), log=config.DAEMON_LOG))
             return 0
         time.sleep(0.3)
-    _p("The daemon did not come up in 18 seconds. Last lines of the log:")
+    _p(t("daemon.start_timeout"))
     _p(_tail(config.DAEMON_LOG, 25))
     return 1
 
@@ -436,16 +429,16 @@ def cmd_daemon_run(args) -> int:
 def cmd_daemon_stop(args) -> int:
     pid = _daemon_pid()
     if not pid:
-        _p("The daemon is not running.")
+        _p(t("daemon.not_running"))
         config.SOCKET.unlink(missing_ok=True)
         return 0
     os.kill(pid, signal.SIGTERM)
     for _ in range(30):
         if not _daemon_pid():
-            _p("Daemon stopped.")
+            _p(t("daemon.stopped"))
             return 0
         time.sleep(0.2)
-    _p("Did not stop on SIGTERM.")
+    _p(t("daemon.stop_timeout"))
     return 1
 
 
@@ -461,7 +454,7 @@ def cmd_daemon_logs(args) -> int:
 
 def _tail(path: Path, n: int) -> str:
     if not path.exists():
-        return f"(no file {path})"
+        return t("cli.no_file", path=path)
     lines = path.read_text(errors="replace").splitlines()
     return "\n".join(lines[-n:])
 
@@ -472,8 +465,7 @@ def _tail(path: Path, n: int) -> str:
 def cmd_accounts(args) -> int:
     found = config.list_accounts()
     if not found:
-        _p(f"Not a single account. Sign in: {config.login_command()}  "
-           "(a second one: --account work)")
+        _p(t("account.none", command=config.login_command()))
         return 1
 
     wanted = getattr(args, "default", None)
@@ -483,46 +475,60 @@ def cmd_accounts(args) -> int:
             _p(config.not_logged_in(label, found))
             return 1
         config.set_default_account(label)
-        _p(f"Default account: {label}. Holds across restarts too.")
+        _p(t("account.default_set", label=label))
         if config.SOCKET.exists():
-            _p("The daemon already holds every account, no need to restart it.")
+            _p(t("account.daemon_holds_all"))
 
     default = config.default_account()
     for label in found:
-        mark = " ← default" if label == default else ""
+        mark = t("account.default_mark") if label == default else ""
         _p(f"{label:12} {config.session_path(label)}.session{mark}")
-    _p(f"\nAdd another: {config.add_account_command()}")
-    _p("Change the default: uv run tg accounts --default <label>")
+    _p(t("account.add_more", command=config.add_account_command()))
+    _p(t("account.change_default"))
     return 0
 
 
 def cmd_status(args) -> int:
     session_file = Path(str(config.session_path(getattr(args, "account", None))) + ".session")
     rows = [
-        ("accounts", ", ".join(config.list_accounts()) or "none"),
-        ("default", config.default_account()),
+        (t("status.row_accounts"), ", ".join(config.list_accounts()) or t("status.no_accounts")),
+        (t("status.row_default"), config.default_account()),
         (
             ".env",
-            "yes"
+            t("status.yes")
             if config.ENV_FILE.exists()
             else (
-                "no file, values from the environment"   # the usual situation in docker
+                t("status.env_from_environment")   # the usual situation in docker
                 if config.env("TG_API_ID")
-                else "MISSING — run tg setup"
+                else t("status.env_missing")
             ),
         ),
-        ("api_id/api_hash", "set" if config.env("TG_API_ID") else "MISSING"),
         (
-            "session",
-            "sign-in unfinished — needs tg password (2FA)"
-            if login_state(getattr(args, "account", None)).exists()
-            else ("yes" if session_file.exists() else "MISSING — run tg login"),
+            "api_id/api_hash",
+            t("status.creds_set") if config.env("TG_API_ID") else t("status.creds_missing"),
         ),
-        ("bot", "token set" if config.bot_token() else "not configured"),
-        ("alert chat", config.alert_chat_id() or "not linked — tg link-bot"),
-        ("write", "allowed" if config.allow_write() else "off"),
-        ("daemon", f"running (pid {_daemon_pid()})" if _daemon_pid() else "not running"),
-        ("socket", "yes" if config.SOCKET.exists() else "no"),
+        (
+            t("status.row_session"),
+            t("status.session_pending_2fa")
+            if login_state(getattr(args, "account", None)).exists()
+            else (t("status.yes") if session_file.exists() else t("status.session_missing")),
+        ),
+        (
+            t("status.row_bot"),
+            t("status.bot_token_set") if config.bot_token() else t("status.bot_not_configured"),
+        ),
+        (t("status.row_alert_chat"), config.alert_chat_id() or t("status.alert_chat_unlinked")),
+        (
+            t("status.row_write"),
+            t("status.write_allowed") if config.allow_write() else t("status.write_off"),
+        ),
+        (
+            t("status.row_daemon"),
+            t("status.daemon_running", pid=_daemon_pid())
+            if _daemon_pid()
+            else t("status.daemon_stopped"),
+        ),
+        (t("status.row_socket"), t("status.yes") if config.SOCKET.exists() else t("status.no")),
     ]
     width = max(len(k) for k, _ in rows)
     for k, v in rows:
@@ -532,7 +538,7 @@ def cmd_status(args) -> int:
         try:
             _p("\n" + json.dumps(asyncio.run(_rpc("status")), ensure_ascii=False, indent=2))
         except Exception as exc:
-            _p(f"\nRPC is not answering: {exc}")
+            _p(t("status.rpc_no_answer", error=exc))
     return 0
 
 
@@ -555,13 +561,11 @@ def capabilities_text(account: str | None = None) -> str:
             # one: the daemon is spinning on code that did not have this method
             # yet. The phrase matched here is the wording the daemon replies
             # with — the two sides have to stay in step.
-            head = ("The daemon is running an old version of the code — restart it: "
-                    "uv run tg daemon restart.\n\n"
+            head = (t("status.daemon_old_code")
                     if "does not know method" in str(exc)
-                    else f"The daemon did not answer ({exc}).\n\n")
+                    else t("status.daemon_no_answer", error=exc))
     else:
-        head = ("The daemon is not running — run `uv run tg daemon start`, "
-                "then `uv run tg capabilities`.\n\n")
+        head = t("status.daemon_not_started")
     local = caps.local_state()
     rows = caps.restrictions(local)
     return head + caps.render({
@@ -599,7 +603,7 @@ def cmd_call(args) -> int:
         _p(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except Exception as exc:
-        _p(f"Error: {exc}")
+        _p(t("cli.error", error=exc))
         return 1
 
 
@@ -625,67 +629,62 @@ def cmd_doctor(args) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="tg", description="Telegram agent control")
+    parser = argparse.ArgumentParser(prog="tg", description=t("cli.description"))
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     def with_account(p):
         """Every sign-in command can work with a second, third and so on account."""
         p.add_argument(
             "--account", default=None,
-            help="account label: main by default, for example work or second",
+            help=t("cli.arg_account"),
         )
         return p
 
     # The wizard comes first on purpose: in `tg --help` it has to be met before
     # the steps it consists of — those are looked up separately, later.
     with_account(
-        sub.add_parser("init", help="setup wizard: walk through everything up to a working state")
+        sub.add_parser("init", help=t("cli.cmd_init"))
     ).set_defaults(fn=cmd_init)
     with_account(
-        sub.add_parser(
-            "doctor",
-            help="installation diagnostics: what is in place, what is broken, what to do",
-        )
+        sub.add_parser("doctor", help=t("cli.cmd_doctor"))
     ).set_defaults(fn=cmd_doctor)
-    sub.add_parser("setup", help="enter api_id/api_hash and the bot token").set_defaults(
-        fn=cmd_setup
-    )
-    sub.add_parser("link-bot", help="link the chat_id for alerts").set_defaults(fn=cmd_link_bot)
-    with_account(sub.add_parser("login", help="sign in to a Telegram account")).set_defaults(
+    sub.add_parser("setup", help=t("cli.cmd_setup")).set_defaults(fn=cmd_setup)
+    sub.add_parser("link-bot", help=t("cli.cmd_link_bot")).set_defaults(fn=cmd_link_bot)
+    with_account(sub.add_parser("login", help=t("cli.cmd_login"))).set_defaults(
         fn=cmd_login
     )
-    sc = with_account(sub.add_parser("send-code", help="sign-in step 1: request the code"))
+    sc = with_account(sub.add_parser("send-code", help=t("cli.cmd_send_code")))
     sc.add_argument("phone")
     sc.set_defaults(fn=cmd_send_code)
 
-    si = with_account(sub.add_parser("sign-in", help="sign-in step 2: confirm the code"))
+    si = with_account(sub.add_parser("sign-in", help=t("cli.cmd_sign_in")))
     si.add_argument("--code", required=True)
-    si.add_argument("--password", default=None, help="2FA password, if it is enabled")
+    si.add_argument("--password", default=None, help=t("cli.arg_password"))
     si.set_defaults(fn=cmd_sign_in)
 
     with_account(
-        sub.add_parser("password", help="step 3: enter the cloud 2FA password")
+        sub.add_parser("password", help=t("cli.cmd_password"))
     ).set_defaults(fn=cmd_password)
     with_account(
-        sub.add_parser("logout", help="revoke the session and delete the files")
+        sub.add_parser("logout", help=t("cli.cmd_logout"))
     ).set_defaults(fn=cmd_logout)
-    with_account(sub.add_parser("status", help="state of the installation")).set_defaults(
+    with_account(sub.add_parser("status", help=t("cli.cmd_status"))).set_defaults(
         fn=cmd_status
     )
-    acc = sub.add_parser("accounts", help="which accounts are signed in")
+    acc = sub.add_parser("accounts", help=t("cli.cmd_accounts"))
     acc.add_argument(
-        "--default", default=None, metavar="LABEL",
-        help="remember this account as the default for all clients and restarts",
+        "--default", default=None, metavar=t("cli.metavar_label"),
+        help=t("cli.arg_default_account"),
     )
     acc.set_defaults(fn=cmd_accounts)
     with_account(
-        sub.add_parser("capabilities", help="what is available and what is missing")
+        sub.add_parser("capabilities", help=t("cli.cmd_capabilities"))
     ).set_defaults(fn=cmd_capabilities)
 
-    d = sub.add_parser("daemon", help="daemon control")
+    d = sub.add_parser("daemon", help=t("cli.cmd_daemon"))
     dsub = d.add_subparsers(dest="action", required=True)
     dsub.add_parser("start").set_defaults(fn=cmd_daemon_start)
-    dsub.add_parser("run", help="in the foreground (for docker/launchd)").set_defaults(
+    dsub.add_parser("run", help=t("cli.cmd_daemon_run")).set_defaults(
         fn=cmd_daemon_run
     )
     dsub.add_parser("stop").set_defaults(fn=cmd_daemon_stop)
@@ -693,16 +692,16 @@ def main() -> None:
     # `tg daemon status` is what people type first, even though the state lives
     # in `tg status`. Cheaper to accept both forms than to explain why one of
     # them is the wrong one.
-    with_account(dsub.add_parser("status", help="same as tg status")).set_defaults(
+    with_account(dsub.add_parser("status", help=t("cli.cmd_daemon_status"))).set_defaults(
         fn=cmd_status
     )
     logs = dsub.add_parser("logs")
     logs.add_argument("-n", "--lines", type=int, default=40)
     logs.set_defaults(fn=cmd_daemon_logs)
 
-    c = with_account(sub.add_parser("call", help="call a daemon method directly"))
+    c = with_account(sub.add_parser("call", help=t("cli.cmd_call")))
     c.add_argument("method")
-    c.add_argument("params", nargs="?", help='JSON, e.g. \'{"limit": 5}\'')
+    c.add_argument("params", nargs="?", help=t("cli.arg_call_params"))
     c.set_defaults(fn=cmd_call)
 
     args = parser.parse_args()

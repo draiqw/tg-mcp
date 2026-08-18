@@ -94,6 +94,19 @@ taking part is never added: see the closed list of filter actions in
 The repository is in English: comments, docstrings, logs, documentation, test names,
 identifiers, MCP tool descriptions, and the errors returned to Claude.
 
+The one exception is text addressed to the owner — what `tg` prints, the `tg init`
+wizard, `tg doctor`, setup hints, and the alerts, digests, reminders and questions
+delivered through the bot. That text goes through `tgagent/i18n.py`: the code calls
+`t("some.key")` and the catalog holds an entry per supported language side by side. Add
+both halves in the same commit — `scripts/selfcheck.py` fails on a missing translation
+or on placeholders that do not match between languages.
+
+Which language the owner reads is set by `TG_LANG` in `.env`: `en` (the default) or
+`ru`. Values like `ru_RU.UTF-8` or `en-GB` are understood, and an unsupported language
+falls back to `en`. The value is read on every call, so editing `.env` takes effect
+without restarting the daemon. It changes owner-facing text only — logs, errors returned
+to Claude, and all documentation are always English.
+
 ## Code style
 
 - The line limit is 100 characters, the target is around 90. `ruff check` is mandatory.

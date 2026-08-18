@@ -16,6 +16,7 @@ which of this list is set and what permissions the file has.
 | `TG_BOT_TOKEN` | for alerts | bot token from @BotFather |
 | `TG_ALERT_CHAT_ID` | for alerts | where to send; filled in by `tg link-bot` |
 | `TG_ALLOW_WRITE` | no (1 by default) | `0` — read-only mode |
+| `TG_LANG` | no (`en` by default) | language of what the owner reads: `en` or `ru` |
 | `TG_DATA_DIR` | no | where the state lives; `./data` by default, `/data` in docker |
 | `TG_ENV_FILE` | no | a non-standard location of `.env` itself |
 
@@ -26,6 +27,29 @@ from your own chats.
 Get a **separate** bot for the agent. The daemon hard-ignores messages from the
 bot whose token is in its config — otherwise an alert flies back in as an
 incoming message and causes the next alert, up to FloodWait.
+
+### Interface language
+
+```bash
+TG_LANG=ru
+```
+
+`en` by default. It picks the language of the text addressed to the owner: setup
+hints, the `tg init` wizard, `tg doctor`, everything `tg` prints, and the alerts,
+digests, reminders and questions that arrive through the bot.
+
+Nothing else moves with it. Logs, the errors returned to Claude and all of
+`docs/` are always English: those are read by a developer, a reviewer or the
+model, and a translated traceback only makes the problem harder to search for.
+
+The value is re-read on every call, so an edited `.env` takes effect without
+restarting the daemon. Values like `ru_RU.UTF-8` or `en-GB` are understood — that
+is what people paste out of their system locale — and an unsupported language
+falls back to `en` instead of failing.
+
+Both languages live side by side in `tgagent/i18n.py`, one catalog keyed by a
+short identifier. `scripts/selfcheck.py` fails on any gap in it: a language that
+covers half the messages is worse than no language at all.
 
 ### Read-only mode
 

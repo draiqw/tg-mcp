@@ -111,6 +111,13 @@ can be attached to an issue in full. If something still does not work after it �
 [docs/troubleshooting.md](docs/troubleshooting.md): the common breakages are listed there
 as they look from outside.
 
+One setting is worth knowing this early: `TG_LANG` in `.env` (`en` by default, `ru` also
+available) picks the language of everything addressed to you — the setup hints, the `tg
+init` wizard, `tg doctor`, everything `tg` prints, and the alerts, digests, reminders and
+questions delivered through the bot. Logs, errors returned to Claude and all documentation
+stay English; the value is read on every call, so editing `.env` needs no restart, and an
+unsupported language falls back to `en`.
+
 ### If you would rather go step by step
 
 The wizard does nothing on its own — it calls the same commands, and any of them can be

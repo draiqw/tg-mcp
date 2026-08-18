@@ -8,15 +8,16 @@ the code talks to Telegram. Everything else is transport and scaffolding:
 | File | Lines | Role |
 |---|---|---|
 | **`tgagent/core.py`** | 5183 | **core: all account operations, chat resolution, limits** |
-| `tgagent/daemon.py` | 2041 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
+| `tgagent/daemon.py` | 2047 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
 | `tgagent/mcp_server.py` | 1575 | 79 tools, each one a single call to the daemon |
 | `tgagent/index.py` | 670 | local index of the correspondence: sqlite + FTS5, Russian morphology |
 | `tgagent/memory.py` | 234 | chat dossiers: file format, prompt, language-model call |
-| `tgagent/cli.py` | 713 | setup, sign-in, daemon control |
-| `tgagent/install.py` | 1077 | the `tg init` wizard and the `tg doctor` diagnostics: installation state, steps, registration in the client |
-| `tgagent/config.py` | 473 | paths, `.env`, rules, limits |
+| `tgagent/cli.py` | 712 | setup, sign-in, daemon control |
+| `tgagent/install.py` | 1007 | the `tg init` wizard and the `tg doctor` diagnostics: installation state, steps, registration in the client |
+| `tgagent/config.py` | 461 | paths, `.env`, rules, limits |
 | `tgagent/capabilities.py` | 764 | tables of "what a given tool needs", checks of the local setup, summary text, translation of Telegram errors |
-| `tgagent/alerts.py` | 138 | Bot API: alerts, commands, buttons under the agent's questions |
+| `tgagent/alerts.py` | 137 | Bot API: alerts, commands, buttons under the agent's questions |
+| `tgagent/i18n.py` | 1855 | language catalog: owner-facing texts in `en` and `ru`, chosen by `TG_LANG` |
 
 The rule is simple: a new capability goes into `core.py` as a `TelegramService`
 method, gets registered in the daemon's `dispatch_table()` and is wrapped by a
@@ -38,6 +39,18 @@ too, because you have to go to Telegram for them. The split is not cosmetic: wit
 it `tg setup` and `tg login` could not show the summary before the daemon's first
 run — and that is exactly the moment when the owner does not yet understand what he
 has got.
+
+`i18n.py` is a table, not logic: it holds both languages side by side, and `TG_LANG`
+(`en` by default) picks one of them. Only text addressed to the owner goes through
+it — setup hints, the `tg init` wizard, `tg doctor`, everything `tg` prints, and the
+alerts, digests, reminders and questions delivered through the bot. Logs, errors
+returned to Claude and the whole documentation are always English: they are read by
+a developer or by the model, not by the owner. The value is read on every call, so
+editing `.env` takes effect without restarting the daemon. Values like `ru_RU.UTF-8`
+or `en-GB` are understood, an unsupported language falls back to `en`. Keeping both
+languages in one file is what makes a gap visible: `scripts/selfcheck.py` compares
+the halves and complains about a key that exists in one language only, or about
+placeholders that do not match.
 
 `install.py` is scaffolding over scaffolding: it talks neither to Telegram nor to
 the daemon and does nothing by itself. It looks at the state of the installation and
@@ -254,7 +267,10 @@ them, and therefore drifts apart especially quietly:
   is closed by `_assert_write()` in the core fully and partly, the Telegram
   configuration keys are declared in the core's tables, and every right in a chat has a
   human-readable name. The summary promises the owner numbers and lists; it would get them
-  wrong silently.
+  wrong silently;
+- the language catalog `i18n.py`: the `en` and `ru` halves hold the same set of keys and
+  the same named placeholders in every entry. A key missing in one language, or a
+  placeholder renamed in one half only, would show up as a hole in the owner's text.
 
 One selfcheck is not enough for the summary by agreement: the names of the rights are
 Telethon fields, and their existence is checked by a test, because for that Telethon has

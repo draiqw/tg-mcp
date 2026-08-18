@@ -236,6 +236,63 @@ def arch_file_rows() -> dict[str, int]:
     return {path: int(n) for path, n in rows}
 
 
+def i18n_assigned(name: str) -> ast.expr | None:
+    """A top-level value from i18n.py, annotation and all.
+
+    `SUPPORTED` and `MESSAGES` are declared as `NAME: type = ...`, which the
+    helpers above walk past: they only look at `ast.Assign`. A catalog read
+    through them would come back empty, and an empty catalog passes every check.
+    """
+    tree = ast.parse((ROOT / "tgagent" / "i18n.py").read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+            return node.value
+    return None
+
+
+def i18n_languages() -> list[str]:
+    """The languages the catalog promises — `SUPPORTED`, in the declared order."""
+    value = i18n_assigned("SUPPORTED")
+    if not isinstance(value, (ast.Tuple, ast.List, ast.Set)):
+        return []
+    return [e.value for e in value.elts if isinstance(e, ast.Constant)]
+
+
+def i18n_catalog() -> dict[str, dict[str, str]]:
+    """`MESSAGES` from i18n.py: key -> language -> template.
+
+    Unlike the other tables, here the value matters and not the key: what is
+    checked is the halves of an entry and the substitutions inside them.
+    """
+    value = i18n_assigned("MESSAGES")
+    if not isinstance(value, ast.Dict):
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for key, entry in zip(value.keys, value.values, strict=True):
+        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+            continue
+        if not isinstance(entry, ast.Dict):
+            continue
+        out[key.value] = {
+            lang.value: text.value
+            for lang, text in zip(entry.keys, entry.values, strict=True)
+            if isinstance(lang, ast.Constant) and isinstance(lang.value, str)
+            and isinstance(text, ast.Constant) and isinstance(text.value, str)
+        }
+    return out
+
+
+# The same rule as `i18n.placeholders`, repeated here rather than imported: the
+# script reads the sources, it does not run them.
+PLACEHOLDER = re.compile(r"\{(\w+)")
+
+
 # Daemon methods the core does not have and must not have: they need the event
 # stream, the bot channel or the daemon's own file, not a call to Telegram.
 DAEMON_OWN = {
@@ -453,6 +510,38 @@ def check_settings(disp: set[str]) -> None:
     )
 
 
+def check_i18n() -> None:
+    """The language catalog: no holes between the languages, no drifted substitutions.
+
+    A key without a translation is a line in a foreign language in the middle of
+    the owner's text; a placeholder renamed in one half only is a phrase with a
+    hole in it. Both show up at the moment the message is printed, which is
+    exactly the moment nobody is watching.
+    """
+    langs = i18n_languages()
+    catalog = i18n_catalog()
+
+    gaps = sorted(
+        f"{key}:{lang}"
+        for key, entry in catalog.items()
+        for lang in langs
+        if not entry.get(lang)
+    )
+    check(
+        bool(langs) and not gaps,
+        f"i18n: every key translated into {langs or '?'}: {gaps or 'yes'}",
+    )
+
+    drifted = []
+    for key, entry in sorted(catalog.items()):
+        named = {lang: set(PLACEHOLDER.findall(text)) for lang, text in entry.items()}
+        if len({frozenset(s) for s in named.values()}) > 1:
+            drifted.append(key + ": " + ", ".join(
+                f"{lang} {sorted(names) or '-'}" for lang, names in sorted(named.items())
+            ))
+    check(not drifted, f"i18n: substitutions differ between languages: {drifted or 'none'}")
+
+
 def main() -> int:
     tools = mcp_tools()
     disp = dispatch_methods()
@@ -465,6 +554,7 @@ def main() -> int:
     check_counters(tools, watch)
     check_capabilities(tools)
     check_settings(disp)
+    check_i18n()
 
     for line in notes:
         print(line)

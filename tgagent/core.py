@@ -158,8 +158,8 @@ INDEX_DEFAULT_LIMIT = 2000
 INDEX_MAX_LIMIT = 20000
 INDEX_BATCH = 300
 # Words that mean "the owner" when they appear as an author filter. Matching is
-# language-blind on purpose: these are typed, not read, and a keyboard is not
-# something the code gets to choose.
+# language-blind on purpose: the person types these, they do not read them, and
+# TG_LANG says nothing about the keyboard layout in front of them.
 INDEX_SELF = ("me", "self", "you", "my", "mine", "myself", "я", "себя", "свои", "мои")
 
 # How the owner names Saved Messages. One list for the whole project: the daemon

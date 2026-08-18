@@ -34,6 +34,10 @@ CI runs the same three. The numbers from `pytest` and `selfcheck` are worth
 memorising: the tool counter and the test count are the only defence against
 "fixed it in one layer out of three". The tool counters in README and in `docs/`
 are reconciled by `selfcheck` itself, there is no need to recount them by hand.
+`selfcheck` also compares the two halves of the language catalog in
+`tgagent/i18n.py`: a key present in `en` but missing in `ru` (or with a
+different set of placeholders) is a failure, so a release never ships with a
+half-translated owner-facing string.
 
 ## 2. Both ends of the declared Python
 
@@ -86,6 +90,12 @@ What is actually being checked here:
 - `pytest` in the copy checks that the tests lean neither on `.env`, nor on the
   session file, nor on the author's `data/`. If they go red in a clean copy, then
   they were green on someone else's data.
+
+Both `tg doctor` and `tg init` speak the language from `TG_LANG` (`en` or `ru`,
+`en` by default), so in the clean copy — where there is no `.env` — their output
+must come out in English. It is worth walking the same two commands once with
+`TG_LANG=ru`: the value is read on every call, nothing needs restarting, and an
+unsupported language must quietly fall back to `en` rather than fail.
 
 Delete the copy after the check: `rm -rf /tmp/tg-release-check`. It is left with
 a `.env` full of keys if the wizard got past the first step.

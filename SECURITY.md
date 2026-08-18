@@ -86,6 +86,13 @@ Additionally, in brief:
 - **Audit**: every writing action is written to `data/actions.jsonl` with the
   time, the method, the parameters and the result. After any incident, start
   there.
+- **`TG_LANG`** (`en` | `ru`, default `en`) only picks the language of text
+  addressed to the owner — setup hints, `tg init`, `tg doctor`, everything `tg`
+  prints, and alerts, digests, reminders and questions in the bot. Logs, errors
+  returned to Claude and all documentation stay English, so it changes nothing
+  for audit or for reading an incident. It is read on every call, so editing
+  `.env` takes effect without restarting the daemon; values like `ru_RU.UTF-8`
+  or `en-GB` are understood, an unsupported language falls back to `en`.
 
 Details and rationale — in [docs/security.md](docs/security.md).
 

@@ -307,7 +307,7 @@ def resolving(service, user, supergroup):
 
 
 # "Избранное" stays Cyrillic on purpose: it is an alias the owner types, and
-# core.SAVED_ALIASES matches it in every language the owner may type.
+# core.SAVED_ALIASES matches it in every language regardless of TG_LANG.
 @pytest.mark.parametrize("raw", ["me", "self", "saved", "Избранное", "  ME  "])
 async def test_saved_messages_needs_no_call_to_the_server(resolving, raw):
     assert await resolving.resolve(raw) == "me"

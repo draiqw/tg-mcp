@@ -13,6 +13,7 @@ from typing import Any
 import aiohttp
 
 from . import config
+from .i18n import t
 
 API = "https://api.telegram.org/bot{token}/{method}"
 
@@ -43,15 +44,14 @@ class BotChannel:
     async def call(self, method: str, **params: Any) -> dict:
         if not self.token:
             raise RuntimeError(
-                "TG_BOT_TOKEN is not set: the notification channel is not configured. "
-                "Create a bot with @BotFather and run `uv run tg setup`."
+                t("bot.token_missing")
             )
         sess = await self._http()
         async with sess.post(API.format(token=self.token, method=method), json=params) as resp:
             data = await resp.json()
         if not data.get("ok"):
             raise RuntimeError(
-                f"Bot API refused {method}: {data.get('description')}"
+                t("bot.api_failed", method=method, error=data.get("description"))
             )
         return data["result"]
 
@@ -62,8 +62,7 @@ class BotChannel:
         target = chat_id or self.chat_id
         if not target:
             raise RuntimeError(
-                "TG_ALERT_CHAT_ID is not set: there is nowhere to send the notification. "
-                "Press Start in your bot and run `uv run tg link-bot`."
+                t("bot.chat_id_missing")
             )
         return await self.call(
             "sendMessage",
@@ -95,14 +94,14 @@ class BotChannel:
 def format_reaction(event: dict) -> str:
     """Alert about a reaction to your message."""
     chat = html.escape(event.get("chat") or "?")
-    who = html.escape(event.get("from") or "someone")
+    who = html.escape(event.get("from") or t("alert.someone"))
     emoji = html.escape(str(event.get("emoji") or ""))
     text = html.escape((event.get("text") or "")[:200])
-    body = f"<b>Reaction</b> {emoji} · {chat} · {who}"
+    body = f"<b>{t('alert.reaction')}</b> {emoji} · {chat} · {who}"
     if text:
-        body += f"\n\nto message: {text}"
+        body += f"\n\n{t('alert.on_message')} {text}"
     if event.get("link"):
-        body += f'\n\n<a href="{event["link"]}">Open</a>'
+        body += f'\n\n<a href="{event["link"]}">{t("alert.open")}</a>'
     return body
 
 
@@ -112,16 +111,16 @@ def format_alert(event: dict, reason: str) -> str:
     sender = html.escape(event.get("from") or "?")
     text = html.escape((event.get("text") or "")[:600])
     tag = {
-        "private": "DM",
-        "mention": "Mention",
-        "keyword": "Keyword",
-        "watch": "Watched chat",
-        "reply": "Reply to you",
+        "private": t("alert.tag_private"),
+        "mention": t("alert.tag_mention"),
+        "keyword": t("alert.tag_keyword"),
+        "watch": t("alert.tag_watch"),
+        "reply": t("alert.tag_reply"),
     }.get(reason, reason)
     link = event.get("link")
     account = event.get("account")
     if account and account != config.MAIN_ACCOUNT:
-        tag = f"{tag} · account {html.escape(account)}"
+        tag = f"{tag} · {t('alert.account', account=html.escape(account))}"
     head = f"<b>{tag}</b> · {chat}"
     if chat != sender:
         head += f" · {sender}"
@@ -130,9 +129,9 @@ def format_alert(event: dict, reason: str) -> str:
         body += f"\n\n{text}"
     transcript = event.get("transcript")
     if transcript:
-        body += f"\n\n<b>Transcript:</b> {html.escape(transcript[:900])}"
+        body += f"\n\n<b>{t('alert.transcript')}</b> {html.escape(transcript[:900])}"
     elif not text and event.get("media"):
-        body += "\n\n[attachment]"
+        body += f"\n\n[{t('alert.attachment')}]"
     if link:
-        body += f'\n\n<a href="{link}">Open</a>'
+        body += f'\n\n<a href="{link}">{t("alert.open")}</a>'
     return body

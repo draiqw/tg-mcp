@@ -51,6 +51,7 @@ below.
 | `Permission denied` on `.env` or `data/` | the directory was created by another user (a common story after running docker as root) | give ownership back: `chown` to yourself, `chmod 600 .env`, `chmod 700 data` |
 | nothing starts on Windows | the MCP-to-daemon link goes over a unix socket | WSL or docker |
 | the sign-in is stuck on the 2FA password | the password is read straight from the terminal and never gets into arguments or logs | `uv run tg password` in a real terminal, not from the agent |
+| `tg` speaks the wrong language | `TG_LANG` is unset or holds an unsupported value, so it falls back to `en` | set `TG_LANG=ru` (or `en`) in `.env`; the value is read on every call, no daemon restart needed |
 
 It is better to sign in through the wizard: `uv run tg init` turns Telegram codes
 (`PHONE_CODE_EXPIRED`, `API_ID_INVALID`, `AUTH_KEY_DUPLICATED`,
@@ -71,6 +72,10 @@ the error as an explanation, not as a traceback. `data/events.jsonl` is written
 always, independently of the alert rules, so "did not wake me up" and "did not
 see it" stay distinguishable. `data/actions.jsonl` is the audit of writing calls,
 including the failed ones and the ones the owner declined.
+
+Note that language is not part of any of this: logs and the errors returned to
+Claude are always English, whatever `TG_LANG` says. `TG_LANG` only changes the
+text addressed to the owner — what `tg` prints and what the bot delivers.
 
 ## If none of this fit
 
