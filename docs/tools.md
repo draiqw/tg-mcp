@@ -3,6 +3,34 @@
 79 tools. Each one is a thin wrapper over a core method; all the logic is in
 `tgagent/core.py`.
 
+## What the agent can do
+
+The agent does not only read the correspondence, it also **looks** at pictures (`tg_view`
+returns the image itself) and **listens** to sound: voice messages, video notes, music and
+video are transcribed by Telegram's built-in transcription, through Groq Whisper or by a
+local model. Long posts are retold by Telegram itself (`tg_summarize`), stories are read
+without leaving a trace, and `tg_wait` and `tg_ask` let the agent wait for the message it
+needs or ask the owner for permission right in the bot.
+
+Going through the inbox is not the same as going through the unread: `tg_pending` shows
+the conversations that broke off — who was never answered and who never answered, the
+read-and-forgotten ones included, which the unread counter no longer knows about.
+`tg_person` collects a dossier on a person in one call: profile, flags, shared chats,
+place in the top of your correspondents, the history of the DM. `tg_memory` keeps a
+standing dossier on a chat, so that an unfamiliar conversation does not have to start with
+a thousand messages of history.
+
+The daemon also does what needs no Claude running at all: alerts about important incoming
+messages into your own bot, a digest on a schedule (`digest_at`), mail-style inbox filters
+(mark read, archive, mute, move to a folder, move to Saved Messages) and reminders that
+survive a restart. Auto-replies are deliberately missing from the filter actions: a rule
+works unsupervised, and it must not be able to write to an outside person.
+
+For the chats the owner names, a local full-text index is built (`tg_index`, sqlite +
+FTS5): `tg_search(engine="local")` then searches instantly and can do what the server-side
+search cannot do at all — filter by author, the slice "everything from this person over
+this period", ranking by relevance and highlighting of the match.
+
 ## Accounts
 
 ### `tg_accounts(access=True)`

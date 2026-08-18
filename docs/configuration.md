@@ -146,6 +146,29 @@ must not be able to lift a restriction off itself. An edit to the file takes
 effect immediately, there is no need to restart the daemon — the mode's settings
 are re-read from disk on every writing call.
 
+## What it costs
+
+The agent itself is free, and in its basic form there is nobody to pay: MTProto, the
+notification bot, server-side search, the local index, alerts, the digest, filters and
+reminders cost nothing. A bill can appear in exactly two places, and both of them need a
+key that is not there by default:
+
+- **Chat dossiers** (`tg_memory`) go to an external model and are billed per token — by
+  default `gpt-4o-mini` under the `OPENAI_API_KEY` key. This is the only thing that spends
+  money by itself, with no Claude running, and that is why it is limited three times over:
+  without a key the tool refuses, auto-refresh is off, and once it is on it runs into a cap
+  per hour (`memory_max_per_hour`, 10 by default). `TG_MEMORY_BASE_URL` takes the calls to
+  any compatible service, a local one included — free then.
+- **Audio transcription** (`tg_transcribe`) — three engines at three different prices. The
+  one built into Telegram is computed on its servers and is genuinely available with
+  Premium (without a subscription Telegram gives a small free quota). Groq's free tier is
+  limited by the number of requests, above it there is a paid plan. The local model costs
+  no money at all: its price is a gigabyte and a half of weights and the time it takes to
+  run.
+
+Claude's own tokens do not belong here — they are counted by your client, not by the
+agent. The keys and the caps for both are in the two sections that follow.
+
 ## Chat dossiers
 
 | Variable | What |

@@ -35,6 +35,7 @@ Three things, in decreasing order of danger:
 | a closed list of filter actions | `config.AUTO_ACTIONS`, checked in `validate_auto` | an auto-reply to an outsider caused by a wrong rule: there is no sending to live people among the actions |
 | `confirm_*` and `LIMITS` are not editable through MCP | `daemon.set_rules`, `config.save_rules` | an agent lifting its own restriction |
 | `actions.jsonl` | `daemon.append_action`, read by `tg_actions` and `/actions` | "who sent this" after the fact |
+| a FloodWait comes back as a clear error, not as a crash | `daemon.handle_call`, `capabilities.ERROR_HINTS` | a traceback where the agent needed to be told to wait |
 
 All the checks sit in the core and in the daemon, that is, below the model. The
 agent cannot talk its way around them and cannot raise its own limits through

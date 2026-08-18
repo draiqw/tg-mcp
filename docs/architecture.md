@@ -1,5 +1,22 @@
 # Architecture
 
+## What is inside
+
+```
+MCP client (Claude Code, Claude Desktop, any other)
+        │  stdio
+        ▼
+tgagent.mcp_server ──unix socket──▶ tgagent.daemon ──MTProto──▶ Telegram
+     79 tools          data/daemon.sock      │
+                                             ├─ watcher: incoming → filters → alert
+                                             ├─ digest on a schedule
+                                             ├─ reminders and waiting
+                                             └─ Bot API ──▶ your bot ──▶ you
+```
+
+Everything below unpacks that picture: where the logic sits, why the daemon is a separate
+process, what travels along each arrow and what is left on disk afterwards.
+
 ## Where the core is
 
 `tgagent/core.py`, ~5000 lines, class `TelegramService`. This is the only place where
