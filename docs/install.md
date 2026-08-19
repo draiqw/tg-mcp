@@ -28,6 +28,30 @@ keys, the sign-in, the notification bot, the daemon, registering the MCP server 
 Code and the subagents in `~/.claude/agents`. Every step explains what it is for and what
 stops working without it.
 
+## Without a clone
+
+The same thing is installable as a package, if you would rather have `tg` on PATH than a
+directory to `cd` into:
+
+```bash
+uv tool install --from git+https://github.com/draiqw/tg-mcp tgagent
+tg init
+```
+
+It is installed from git rather than from PyPI, where the package is not published. Two
+differences follow, and both are worth knowing before you sign in:
+
+- **The state lives in `~/.tgagent`** — `.env` and `data/` with the session, the index and
+  the dossiers. A clone keeps them in the clone; a package cannot, because "next to the
+  code" means inside `site-packages`, which the next upgrade rewrites. Both locations are
+  still overridable with `TG_ENV_FILE` and `TG_DATA_DIR`.
+- **The commands lose their `uv run`.** Everything below is written for a clone; installed,
+  drop the prefix — `tg login`, `tg daemon start`. The hints the program prints already
+  know which of the two you have and spell themselves accordingly.
+
+Updating is the same command again with `--force`; `~/.tgagent` is untouched by it, so the
+sign-in survives.
+
 Three properties of the wizard are worth knowing in advance:
 
 - **Only `api_id`/`api_hash` and the sign-in are mandatory.** The bot, the model keys,
@@ -75,6 +99,18 @@ of weights along with it:
 ```bash
 uv sync --extra local-whisper
 ```
+
+Installed as a package there is no project to sync, and the extra cannot be named either
+— `tgagent[local-whisper]` would send uv looking for the package on PyPI. The two engines
+behind the extra are asked for directly instead (drop `mlx-whisper` outside Apple
+Silicon):
+
+```bash
+uv tool install --force --from git+https://github.com/draiqw/tg-mcp \
+    --with mlx-whisper --with faster-whisper tgagent
+```
+
+`tg doctor` prints whichever of the two lines applies to you.
 
 The engines, their keys and how the choice between them is made are in
 [configuration.md](configuration.md#audio-transcription). Autostart after a reboot

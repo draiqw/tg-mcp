@@ -24,17 +24,17 @@ the code talks to Telegram. Everything else is transport and scaffolding:
 
 | File | Lines | Role |
 |---|---|---|
-| **`tgagent/core.py`** | 5183 | **core: all account operations, chat resolution, limits** |
+| **`tgagent/core.py`** | 5182 | **core: all account operations, chat resolution, limits** |
 | `tgagent/daemon.py` | 2047 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
 | `tgagent/mcp_server.py` | 1575 | 79 tools, each one a single call to the daemon |
 | `tgagent/index.py` | 670 | local index of the correspondence: sqlite + FTS5, Russian morphology |
 | `tgagent/memory.py` | 234 | chat dossiers: file format, prompt, language-model call |
 | `tgagent/cli.py` | 712 | setup, sign-in, daemon control |
-| `tgagent/install.py` | 1007 | the `tg init` wizard and the `tg doctor` diagnostics: installation state, steps, registration in the client |
-| `tgagent/config.py` | 461 | paths, `.env`, rules, limits |
-| `tgagent/capabilities.py` | 764 | tables of "what a given tool needs", checks of the local setup, summary text, translation of Telegram errors |
+| `tgagent/install.py` | 1053 | the `tg init` wizard and the `tg doctor` diagnostics: installation state, steps, registration in the client |
+| `tgagent/config.py` | 512 | paths, `.env`, rules, limits |
+| `tgagent/capabilities.py` | 766 | tables of "what a given tool needs", checks of the local setup, summary text, translation of Telegram errors |
 | `tgagent/alerts.py` | 137 | Bot API: alerts, commands, buttons under the agent's questions |
-| `tgagent/i18n.py` | 1855 | language catalog: owner-facing texts in `en` and `ru`, chosen by `TG_LANG` |
+| `tgagent/i18n.py` | 1877 | language catalog: owner-facing texts in `en` and `ru`, chosen by `TG_LANG` |
 
 The rule is simple: a new capability goes into `core.py` as a `TelegramService`
 method, gets registered in the daemon's `dispatch_table()` and is wrapped by a
@@ -68,6 +68,13 @@ or `en-GB` are understood, an unsupported language falls back to `en`. Keeping b
 languages in one file is what makes a gap visible: `scripts/selfcheck.py` compares
 the halves and complains about a key that exists in one language only, or about
 placeholders that do not match.
+
+One substitution is filled in by `t()` itself rather than by the caller: `{cmd}` — how
+`tg` is spelled on this installation. In a clone it is `uv run tg`, installed as a
+package it is `tg`, and eighty-odd hints name a command. Handing each of them the value
+would mean eighty call sites that could forget, and the one that did would print a raw
+`{cmd}` in a message about something already going wrong. `config.command_prefix()`
+decides it once; selfcheck fails on the literal creeping back in anywhere.
 
 `install.py` is scaffolding over scaffolding: it talks neither to Telegram nor to
 the daemon and does nothing by itself. It looks at the state of the installation and
@@ -302,7 +309,12 @@ recent chats). It sends nothing and changes nothing.
 
 ## State on disk
 
-Everything in `data/` (or in `TG_DATA_DIR`):
+Everything in `data/` (or in `TG_DATA_DIR`). Where `data/` itself is depends on how the
+project was installed: a clone keeps it in the clone, an installed package in
+`~/.tgagent`. `config.INSTALLED` tells the two apart by the project file next to the
+package, and the distinction is load-bearing rather than tidy — state written next to an
+installed package is inside `site-packages`, which the next upgrade replaces, session
+file and all.
 
 | File | What |
 |---|---|

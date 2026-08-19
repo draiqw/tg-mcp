@@ -40,8 +40,8 @@ def _daemon_hint() -> str:
         return f"The Telegram agent is not set up yet, so the tools do not work. {setup}"
     return (
         "The Telegram daemon is not answering — no tool works without it. "
-        f"Start it: `cd {config.ROOT} && uv run tg daemon start`, "
-        "then look at `uv run tg daemon logs`."
+        f"Start it: `{config.command_prefix(cd=True)} daemon start`, "
+        f"then look at `{config.command_prefix()} daemon logs`."
     )
 
 

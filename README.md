@@ -71,9 +71,12 @@ again is safe — it does only what is missing, so it doubles as "repair my inst
 It ends by printing `uv run tg capabilities`: what is available, what is blocked and by
 what exactly.
 
-The manual path, the docker path and what to get ready in advance are in
-[docs/install.md](docs/install.md). When something does not work, start with
-`uv run tg doctor` and [docs/troubleshooting.md](docs/troubleshooting.md).
+Installing it as a package instead of a clone (`uv tool install`), the manual path, the
+docker path and what to get ready in advance are in [docs/install.md](docs/install.md).
+What *you* read — the wizard, `tg doctor`, alerts in the bot — is English or Russian by
+`TG_LANG`; the code, the logs and everything the model sees are English either way. When
+something does not work, start with `uv run tg doctor` and
+[docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## Documentation
 

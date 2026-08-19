@@ -207,3 +207,47 @@ def test_keys_are_shaped_as_area_dot_what():
     assert not bad, f"malformed keys: {bad}"
     no_area = [key for key in sorted(MESSAGES) if "." not in key]
     assert not no_area, f"keys without an area: {no_area}"
+
+
+# ---------------------------------------------------------------- commands in messages
+
+
+def test_the_command_is_filled_in_without_being_passed(monkeypatch):
+    """`{cmd}` is the catalog's way of not knowing how the reader spells `tg`.
+
+    The call site does not pass it — there are eighty places that would have to,
+    and the one that forgot would print a raw `{cmd}` at the worst moment.
+    """
+    from tgagent import config
+    from tgagent.i18n import t
+
+    monkeypatch.setattr(config, "INSTALLED", True)
+    assert t("login.next_daemon") == "Next: tg daemon start"
+
+    monkeypatch.setattr(config, "INSTALLED", False)
+    assert t("login.next_daemon") == "Next: uv run tg daemon start"
+
+
+def test_a_passed_value_wins_over_the_filled_in_one(monkeypatch):
+    """Injection must not take a name away from the caller."""
+    from tgagent import config
+    from tgagent.i18n import t
+
+    monkeypatch.setattr(config, "INSTALLED", True)
+    assert t("login.next_daemon", cmd="something else") == "Next: something else daemon start"
+
+
+def test_no_message_spells_the_command_by_hand():
+    """The catalog names commands through `{cmd}` or not at all.
+
+    `uv run tg` in a message is right for a clone and wrong for an installed
+    package, and the reader of that message is the one person who cannot tell
+    which they have.
+    """
+    guilty = sorted(
+        f"{key}:{lang}"
+        for key, entry in MESSAGES.items()
+        for lang, text in entry.items()
+        if "uv run tg" in text or "uv sync --extra" in text
+    )
+    assert not guilty, f"the command is spelled by hand in: {guilty}"

@@ -150,7 +150,8 @@ def _restart_hint(key: str) -> str:
     missing. A value that has already been read, however, cannot be changed that way —
     only by a restart.
     """
-    return " and restart the daemon (uv run tg daemon restart)" if config.env(key) else ""
+    return (f" and restart the daemon ({config.command_prefix()} daemon restart)"
+            if config.env(key) else "")
 
 
 def local_state() -> dict:
@@ -160,9 +161,9 @@ def local_state() -> dict:
     if token and chat_id:
         bot_fix = None
     elif token:
-        bot_fix = "press Start in your bot and run uv run tg link-bot"
+        bot_fix = f"press Start in your bot and run {config.command_prefix()} link-bot"
     else:
-        bot_fix = "create a bot with @BotFather and run uv run tg setup"
+        bot_fix = f"create a bot with @BotFather and run {config.command_prefix()} setup"
 
     confirm = config.load_confirm()
     mode = str(confirm.get("confirm_writes") or "off")
@@ -174,7 +175,8 @@ def local_state() -> dict:
             "what": "writing to the account",
             "detail": "allowed" if config.allow_write() else "off (TG_ALLOW_WRITE=0)",
             "fix": None if config.allow_write()
-            else "set TG_ALLOW_WRITE=1 in .env and restart the daemon (uv run tg daemon restart)",
+            else "set TG_ALLOW_WRITE=1 in .env and restart the daemon "
+                 f"({config.command_prefix()} daemon restart)",
         },
         "confirm_writes": {
             # This is not a breakage but a deliberate choice by the owner, so ok=True even
@@ -224,7 +226,7 @@ def local_state() -> dict:
             "ok": bool(whisper),
             "what": "local transcription model",
             "detail": whisper or "not installed",
-            "fix": None if whisper else "uv sync --extra local-whisper",
+            "fix": None if whisper else config.whisper_command(),
         },
     }
 
@@ -305,7 +307,7 @@ def restrictions(
                    if trial is not None else "")
                 + ", Groq needs a key, the local one needs an installed model",
                 "you need Telegram Premium, or GROQ_API_KEY in .env, "
-                "or uv sync --extra local-whisper",
+                f"or {config.whisper_command()}",
             ))
 
     for tool, (key, why) in sorted(SERVER_FLAG_TOOLS.items()):

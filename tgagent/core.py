@@ -3146,9 +3146,8 @@ class TelegramService:
             from faster_whisper import WhisperModel
         except ImportError:
             raise RuntimeError(
-                "The local model is not installed. Install one of these:\n"
-                "  uv sync --extra local-whisper        (mlx-whisper, fast on Apple Silicon)\n"
-                "  uv pip install faster-whisper        (everywhere)"
+                "The local model is not installed. Install it:\n"
+                f"  {config.whisper_command()}"
             ) from None
         name = model.split("/")[-1].replace("whisper-", "")
         wm = WhisperModel(name, device="cpu", compute_type="int8")

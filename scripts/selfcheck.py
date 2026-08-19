@@ -541,6 +541,32 @@ def check_i18n() -> None:
             ))
     check(not drifted, f"i18n: substitutions differ between languages: {drifted or 'none'}")
 
+    check_commands()
+
+
+def check_commands() -> None:
+    """No hint spells the command by hand.
+
+    `uv run tg` is right in a clone and wrong in an installed package, where `tg`
+    is already on PATH and there is no project to run inside. Whoever writes the
+    hint cannot know which one the reader has, so the spelling is decided at
+    runtime by `config.command_prefix()` — reached from the catalog as `{cmd}`
+    and from the code directly. A literal that slips back in is only wrong for
+    the half of the users who never file the bug.
+    """
+    literals = ("uv run tg", "uv sync --extra")
+    guilty = []
+    for path in sorted((ROOT / "tgagent").glob("*.py")):
+        # config.py is where the two spellings are decided; it is allowed to name them.
+        if path.name == "config.py":
+            continue
+        text = path.read_text()
+        for line_no, line in enumerate(text.splitlines(), 1):
+            if any(bad in line for bad in literals):
+                guilty.append(f"{path.name}:{line_no}")
+    check(not guilty, f"commands spelled by hand instead of config.command_prefix(): "
+                      f"{guilty or 'none'}")
+
 
 def main() -> int:
     tools = mcp_tools()

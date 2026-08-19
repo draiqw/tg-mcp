@@ -51,17 +51,37 @@ def t(key: str, /, **kwargs: object) -> str:
     Never raises. A missing key or a bad substitution returns something readable
     instead of killing the alert that carried it: the daemon must survive its own
     bugs, and `selfcheck` catches these long before a human does.
+
+    `{cmd}` and `{cmd_cd}` are filled in here rather than by the caller — see
+    `commands()`.
     """
     entry = MESSAGES.get(key)
     if entry is None:
         return key
     template = entry.get(language()) or entry.get(DEFAULT) or key
-    if not kwargs:
+    if not kwargs and "{cmd" not in template:
         return template
     try:
-        return template.format(**kwargs)
+        return template.format(**{**commands(), **kwargs})
     except (KeyError, IndexError, ValueError):
         return template
+
+
+def commands() -> dict[str, str]:
+    """`{cmd}` and `{cmd_cd}` for the templates below — how `tg` is spelled here.
+
+    Filled in by `t()` for every message, so a hint that names a command does not
+    have to be handed one at the call site, and the difference between a clone and
+    an installed package is decided in one place. `{cmd_cd}` is the form that also
+    works from another directory. Late import for the same reason as in
+    `language()`.
+    """
+    from . import config
+
+    return {
+        "cmd": config.command_prefix(),
+        "cmd_cd": config.command_prefix(cd=True),
+    }
 
 
 def placeholders(template: str) -> set[str]:
@@ -83,8 +103,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ru": "Плохая метка аккаунта: {account}",
     },
     "account.change_default": {
-        "en": "Change the default: uv run tg accounts --default <label>",
-        "ru": "Сменить умолчание: uv run tg accounts --default <метка>",
+        "en": "Change the default: {cmd} accounts --default <label>",
+        "ru": "Сменить умолчание: {cmd} accounts --default <метка>",
     },
     "account.daemon_holds_all": {
         "en": "The daemon already holds every account, no need to restart it.",
@@ -207,11 +227,11 @@ MESSAGES: dict[str, dict[str, str]] = {
     "bot.chat_id_missing": {
         "en": (
             "TG_ALERT_CHAT_ID is not set: there is nowhere to send the notification. Press Start "
-            "in your bot and run `uv run tg link-bot`."
+            "in your bot and run `{cmd} link-bot`."
         ),
         "ru": (
             "TG_ALERT_CHAT_ID не задан: некуда слать уведомление. Нажми Start у своего бота и "
-            "запусти `uv run tg link-bot`."
+            "запусти `{cmd} link-bot`."
         ),
     },
     "bot.error": {
@@ -277,11 +297,11 @@ MESSAGES: dict[str, dict[str, str]] = {
     "bot.token_missing": {
         "en": (
             "TG_BOT_TOKEN is not set: the notification channel is not configured. Create a bot "
-            "with @BotFather and run `uv run tg setup`."
+            "with @BotFather and run `{cmd} setup`."
         ),
         "ru": (
             "TG_BOT_TOKEN не задан: канал уведомлений не настроен. Заведи бота у @BotFather и "
-            "запусти `uv run tg setup`."
+            "запусти `{cmd} setup`."
         ),
     },
     "bot.watching": {
@@ -515,8 +535,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ru": "{name}: отличается от репозитория",
     },
     "doctor.agent_fix": {
-        "en": "uv run tg init — it will ask again and update; by hand: cp {src} {dst}",
-        "ru": "uv run tg init — переспросит и обновит; вручную: cp {src} {dst}",
+        "en": "{cmd} init — it will ask again and update; by hand: cp {src} {dst}",
+        "ru": "{cmd} init — переспросит и обновит; вручную: cp {src} {dst}",
     },
     "doctor.agent_missing": {
         "en": "{name}: not installed",
@@ -545,8 +565,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ru": "всё на месте",
     },
     "doctor.api_fix": {
-        "en": "uv run tg init (or uv run tg setup)",
-        "ru": "uv run tg init (или uv run tg setup)",
+        "en": "{cmd} init (or {cmd} setup)",
+        "ru": "{cmd} init (или {cmd} setup)",
     },
     "doctor.api_set": {
         "en": "api_id/api_hash are set",
@@ -557,8 +577,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ru": "api_id/api_hash не заданы",
     },
     "doctor.autostart_fix": {
-        "en": "uv run tg init will offer to install it",
-        "ru": "uv run tg init предложит его поставить",
+        "en": "{cmd} init will offer to install it",
+        "ru": "{cmd} init предложит его поставить",
     },
     "doctor.autostart_missing": {
         "en": "there is no autostart ({kind}): after a reboot the daemon has to be raised by hand",
@@ -573,12 +593,12 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ru": "плохо: {n}",
     },
     "doctor.bot_fix": {
-        "en": "uv run tg init: without the bot there are no alerts, no digest and no tg_ask",
-        "ru": "uv run tg init: без бота нет алертов, дайджеста и tg_ask",
+        "en": "{cmd} init: without the bot there are no alerts, no digest and no tg_ask",
+        "ru": "{cmd} init: без бота нет алертов, дайджеста и tg_ask",
     },
     "doctor.bot_link_fix": {
-        "en": "uv run tg link-bot — press Start in the chat with the bot",
-        "ru": "uv run tg link-bot — нажми Start в чате с ботом",
+        "en": "{cmd} link-bot — press Start in the chat with the bot",
+        "ru": "{cmd} link-bot — нажми Start в чате с ботом",
     },
     "doctor.bot_missing": {
         "en": "the notification bot is not set up",
@@ -599,9 +619,9 @@ MESSAGES: dict[str, dict[str, str]] = {
     "doctor.claude_missing_fix": {
         "en": (
             "if the client is a different one this is normal; the registration command is printed "
-            "by uv run tg init"
+            "by {cmd} init"
         ),
-        "ru": "если клиент другой — это нормально; команду регистрации печатает uv run tg init",
+        "ru": "если клиент другой — это нормально; команду регистрации печатает {cmd} init",
     },
     "doctor.daemon_running": {
         "en": "running, pid {pid}",
@@ -648,8 +668,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ru": ".env есть",
     },
     "doctor.fix_hint": {
-        "en": "most of this is fixed by the wizard: uv run tg init",
-        "ru": "большую часть этого чинит мастер: uv run tg init",
+        "en": "most of this is fixed by the wizard: {cmd} init",
+        "ru": "большую часть этого чинит мастер: {cmd} init",
     },
     "doctor.groq_set": {
         "en": "GROQ_API_KEY is set",
@@ -667,8 +687,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ru": "вход не завершён: код принят, облачный пароль не введён",
     },
     "doctor.login_pending_fix": {
-        "en": "uv run tg password — the password is typed only by hand, from a live terminal",
-        "ru": "uv run tg password — пароль вводится только руками, с живого терминала",
+        "en": "{cmd} password — the password is typed only by hand, from a live terminal",
+        "ru": "{cmd} password — пароль вводится только руками, с живого терминала",
     },
     "doctor.mcp_missing": {
         "en": "MCP server {name} is not registered",
@@ -700,13 +720,17 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "project directory: {path}",
         "ru": "каталог проекта: {path}",
     },
+    "doctor.root_installed": {
+        "en": "installed as a package: {path}",
+        "ru": "установлено пакетом: {path}",
+    },
     "doctor.rpc_bad": {
         "en": "RPC does not answer: {error}",
         "ru": "RPC не отвечает: {error}",
     },
     "doctor.rpc_fix": {
-        "en": "uv run tg daemon restart, then uv run tg daemon logs",
-        "ru": "uv run tg daemon restart, потом uv run tg daemon logs",
+        "en": "{cmd} daemon restart, then {cmd} daemon logs",
+        "ru": "{cmd} daemon restart, потом {cmd} daemon logs",
     },
     "doctor.rpc_ok": {
         "en": "RPC answers, live sessions: {sessions}",
@@ -933,16 +957,16 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ru": "Привязать сейчас (надо нажать Start у бота)?",
     },
     "init.bot_link_skipped": {
-        "en": "linking the bot's chat_id: press Start at your bot and run uv run tg link-bot",
-        "ru": "привязка chat_id бота: нажми Start у своего бота и запусти uv run tg link-bot",
+        "en": "linking the bot's chat_id: press Start at your bot and run {cmd} link-bot",
+        "ru": "привязка chat_id бота: нажми Start у своего бота и запусти {cmd} link-bot",
     },
     "init.bot_token_only": {
         "en": "The token is already there, only chat_id is missing.",
         "ru": "Токен уже есть, не хватает только chat_id.",
     },
     "init.check_all": {
-        "en": "To check the whole installation: uv run tg doctor",
-        "ru": "Проверить установку целиком: uv run tg doctor",
+        "en": "To check the whole installation: {cmd} doctor",
+        "ru": "Проверить установку целиком: {cmd} doctor",
     },
     "init.daemon_failed": {
         "en": "The daemon did not come up. Common reasons:",
@@ -961,12 +985,12 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
     },
     "init.daemon_log": {
-        "en": "Full log: uv run tg daemon logs -n 50 ({path})",
-        "ru": "Полный лог: uv run tg daemon logs -n 50 ({path})",
+        "en": "Full log: {cmd} daemon logs -n 50 ({path})",
+        "ru": "Полный лог: {cmd} daemon logs -n 50 ({path})",
     },
     "init.daemon_reason_login": {
-        "en": "the sign-in is not finished: uv run tg password",
-        "ru": "вход не завершён: uv run tg password",
+        "en": "the sign-in is not finished: {cmd} password",
+        "ru": "вход не завершён: {cmd} password",
     },
     "init.daemon_reason_running": {
         "en": (
@@ -1004,16 +1028,16 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ru": "Не поставилось: {why}",
     },
     "init.interrupted": {
-        "en": "Interrupted. What is already done is saved — run uv run tg init again.",
-        "ru": "Прервано. Уже сделанное сохранено — запусти uv run tg init заново.",
+        "en": "Interrupted. What is already done is saved — run {cmd} init again.",
+        "ru": "Прервано. Уже сделанное сохранено — запусти {cmd} init заново.",
     },
     "init.key_prompt": {
         "en": "{name} (input hidden, Enter to skip)",
         "ru": "{name} (ввод скрыт, Enter чтобы пропустить)",
     },
     "init.local_whisper_ask": {
-        "en": "Install it now (uv sync --extra local-whisper)?",
-        "ru": "Поставить сейчас (uv sync --extra local-whisper)?",
+        "en": "Install it now ({command})?",
+        "ru": "Поставить сейчас ({command})?",
     },
     "init.local_whisper_intro": {
         "en": (
@@ -1032,8 +1056,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ru": "Вход не прошёл: {why}",
     },
     "init.login_interrupted": {
-        "en": "Sign-in interrupted. To repeat: uv run tg login",
-        "ru": "Вход прерван. Повторить: uv run tg login",
+        "en": "Sign-in interrupted. To repeat: {cmd} login",
+        "ru": "Вход прерван. Повторить: {cmd} login",
     },
     "init.login_intro": {
         "en": (
@@ -1188,8 +1212,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ru": "(необязательно, Enter — пропустить)",
     },
     "init.required_step_failed": {
-        "en": "Without this step you cannot go on. Fix it and run the wizard again: uv run tg init",
-        "ru": "Без этого шага дальше нельзя. Почини и запусти мастер заново: uv run tg init",
+        "en": "Without this step you cannot go on. Fix it and run the wizard again: {cmd} init",
+        "ru": "Без этого шага дальше нельзя. Почини и запусти мастер заново: {cmd} init",
     },
     "init.skipped": {
         "en": "Skipped — {cost}.",
@@ -1247,8 +1271,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ru": "токен есть, chat_id привязан",
     },
     "init.step_bot_fix": {
-        "en": "uv run tg setup, then uv run tg link-bot",
-        "ru": "uv run tg setup, затем uv run tg link-bot",
+        "en": "{cmd} setup, then {cmd} link-bot",
+        "ru": "{cmd} setup, затем {cmd} link-bot",
     },
     "init.step_bot_title": {
         "en": "notification bot",
@@ -1382,85 +1406,85 @@ MESSAGES: dict[str, dict[str, str]] = {
     "login.hint_api_id_flood": {
         "en": (
             "Telegram considers these api_id/api_hash leaked into public access and has limited "
-            "them. Create a new application on my.telegram.org and enter its keys: uv run tg setup"
+            "them. Create a new application on my.telegram.org and enter its keys: {cmd} setup"
         ),
         "ru": (
             "эти api_id/api_hash Telegram считает утёкшими в публичный доступ и ограничил. Создай "
-            "на my.telegram.org новое приложение и введи его ключи: uv run tg setup"
+            "на my.telegram.org новое приложение и введи его ключи: {cmd} setup"
         ),
     },
     "login.hint_api_id_invalid": {
         "en": (
             "Telegram did not accept api_id/api_hash. Check that they were copied from "
-            "my.telegram.org → API development tools in full: uv run tg setup"
+            "my.telegram.org → API development tools in full: {cmd} setup"
         ),
         "ru": (
             "Telegram не принял api_id/api_hash. Проверь, что они скопированы с my.telegram.org → "
-            "API development tools целиком: uv run tg setup"
+            "API development tools целиком: {cmd} setup"
         ),
     },
     "login.hint_auth_key_duplicated": {
         "en": (
             "the session file was used from another machine at the same time, and Telegram revoked "
-            "it. data/session.session must not be copied between machines — sign in again: uv run "
-            "tg login"
+            "it. data/session.session must not be copied between machines — sign in again: "
+            "{cmd} login"
         ),
         "ru": (
             "файл сессии использовался с другой машины одновременно, и Telegram его отозвал. "
-            "Копировать data/session.session между машинами нельзя — войди заново: uv run tg login"
+            "Копировать data/session.session между машинами нельзя — войди заново: {cmd} login"
         ),
     },
     "login.hint_auth_key_unregistered": {
         "en": (
             "the session was revoked on the Telegram side (usually it was closed in the device "
-            "list). Sign in again: uv run tg login"
+            "list). Sign in again: {cmd} login"
         ),
         "ru": (
             "сессия отозвана на стороне Telegram (обычно её закрыли в списке устройств). Войди "
-            "заново: uv run tg login"
+            "заново: {cmd} login"
         ),
     },
     "login.hint_code_empty": {
-        "en": "no code was entered. Start the sign-in again: uv run tg login",
-        "ru": "код не введён. Запусти вход заново: uv run tg login",
+        "en": "no code was entered. Start the sign-in again: {cmd} login",
+        "ru": "код не введён. Запусти вход заново: {cmd} login",
     },
     "login.hint_code_expired": {
         "en": (
-            "the code has gone stale — Telegram keeps it for a few minutes. Request a new one: uv "
-            "run tg login"
+            "the code has gone stale — Telegram keeps it for a few minutes. Request a new one: "
+            "{cmd} login"
         ),
-        "ru": "код протух — Telegram держит его несколько минут. Запроси новый: uv run tg login",
+        "ru": "код протух — Telegram держит его несколько минут. Запроси новый: {cmd} login",
     },
     "login.hint_code_invalid": {
         "en": (
             "the code did not fit. It arrives in the Telegram app itself (not SMS) and is typed "
-            "without spaces. Start the sign-in again: uv run tg login"
+            "without spaces. Start the sign-in again: {cmd} login"
         ),
         "ru": (
             "код не подошёл. Он приходит в само приложение Telegram (не SMS) и вводится без "
-            "пробелов. Запусти вход заново: uv run tg login"
+            "пробелов. Запусти вход заново: {cmd} login"
         ),
     },
     "login.hint_password_invalid": {
         "en": (
             "the cloud password of two-step verification did not fit. This is the Telegram "
             "password (Settings → Privacy and Security → Two-Step Verification), not the password "
-            "of your mail or Apple ID. To repeat only the password: uv run tg password"
+            "of your mail or Apple ID. To repeat only the password: {cmd} password"
         ),
         "ru": (
             "облачный пароль двухэтапной аутентификации не подошёл. Это пароль Telegram (Settings "
             "→ Privacy and Security → Two-Step Verification), а не пароль от почты или Apple ID. "
-            "Повторить только ввод пароля: uv run tg password"
+            "Повторить только ввод пароля: {cmd} password"
         ),
     },
     "login.hint_password_needed": {
         "en": (
             "the account has two-step verification on: only the password is left. Type it yourself "
-            "in the terminal: uv run tg password"
+            "in the terminal: {cmd} password"
         ),
         "ru": (
             "у аккаунта включена двухэтапная аутентификация: остался только пароль. Введи его сам "
-            "в терминале: uv run tg password"
+            "в терминале: {cmd} password"
         ),
     },
     "login.hint_phone_banned": {
@@ -1482,17 +1506,15 @@ MESSAGES: dict[str, dict[str, str]] = {
     },
     "login.need_tty": {
         "en": (
-            "A real terminal is required: open a terminal and run there\n  cd {root} && uv run tg "
-            "password"
+            "A real terminal is required: open a terminal and run there\n  {cmd_cd} password"
         ),
         "ru": (
-            "Нужен настоящий терминал: открой терминал и выполни там\n  cd {root} && uv run tg "
-            "password"
+            "Нужен настоящий терминал: открой терминал и выполни там\n  {cmd_cd} password"
         ),
     },
     "login.next_daemon": {
-        "en": "Next: uv run tg daemon start",
-        "ru": "Дальше: uv run tg daemon start",
+        "en": "Next: {cmd} daemon start",
+        "ru": "Дальше: {cmd} daemon start",
     },
     "login.onboarding_title": {
         "en": "What you can do",
@@ -1517,11 +1539,11 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": (
             "\nNot signed in. If the password is forgotten — reset it in the Telegram "
             "app:\nSettings → Privacy and Security → Two-Step Verification → Forgot "
-            "password,\nthen repeat: uv run tg send-code <your number>"
+            "password,\nthen repeat: {cmd} send-code <your number>"
         ),
         "ru": (
             "\nНе вошли. Если пароль забыт — сбрось его в приложении Telegram:\nSettings → Privacy "
-            "and Security → Two-Step Verification → Forgot password,\nзатем повтори: uv run tg "
+            "and Security → Two-Step Verification → Forgot password,\nзатем повтори: {cmd} "
             "send-code <твой номер>"
         ),
     },
@@ -1658,16 +1680,16 @@ MESSAGES: dict[str, dict[str, str]] = {
         "ru": "   Готово: алерты пойдут в chat_id {chat_id}",
     },
     "setup.bot_not_started": {
-        "en": "   Gave up waiting. Press Start and run `uv run tg link-bot`.",
-        "ru": "   Не дождался. Нажми Start и запусти `uv run tg link-bot`.",
+        "en": "   Gave up waiting. Press Start and run `{cmd} link-bot`.",
+        "ru": "   Не дождался. Нажми Start и запусти `{cmd} link-bot`.",
     },
     "setup.bot_start": {
         "en": "\n3) Open https://t.me/{username} and press Start (waiting up to 120 seconds)...",
         "ru": "\n3) Открой https://t.me/{username} и нажми Start (жду до 120 секунд)...",
     },
     "setup.bot_token_missing": {
-        "en": "TG_BOT_TOKEN is not set — run `uv run tg setup`.",
-        "ru": "TG_BOT_TOKEN не задан — запусти `uv run tg setup`.",
+        "en": "TG_BOT_TOKEN is not set — run `{cmd} setup`.",
+        "ru": "TG_BOT_TOKEN не задан — запусти `{cmd} setup`.",
     },
     "setup.bot_token_prompt": {
         "en": "   TG_BOT_TOKEN (hidden input, Enter to skip): ",
@@ -1680,11 +1702,11 @@ MESSAGES: dict[str, dict[str, str]] = {
     "setup.env_missing": {
         "en": (
             "{name} is set neither in the environment nor in {env_file}. Run the setup in your own "
-            "terminal: cd {root} && uv run tg init"
+            "terminal: {cmd_cd} init"
         ),
         "ru": (
             "{name} не задан ни в окружении, ни в {env_file}. Пройди установку в своём терминале: "
-            "cd {root} && uv run tg init"
+            "{cmd_cd} init"
         ),
     },
     "setup.intro": {
@@ -1700,11 +1722,11 @@ MESSAGES: dict[str, dict[str, str]] = {
     "setup.no_api_keys": {
         "en": (
             "The app keys (TG_API_ID/TG_API_HASH) are not set — you get them at my.telegram.org. "
-            "The whole setup: cd {root} && uv run tg init"
+            "The whole setup: {cmd_cd} init"
         ),
         "ru": (
             "Ключи приложения (TG_API_ID/TG_API_HASH) не заданы — их берут на my.telegram.org. "
-            "Установка целиком: cd {root} && uv run tg init"
+            "Установка целиком: {cmd_cd} init"
         ),
     },
     "setup.no_session": {
@@ -1757,20 +1779,20 @@ MESSAGES: dict[str, dict[str, str]] = {
     },
     "status.daemon_not_started": {
         "en": (
-            "The daemon is not running — run `uv run tg daemon start`, then `uv run tg "
+            "The daemon is not running — run `{cmd} daemon start`, then `{cmd} "
             "capabilities`.\n\n"
         ),
         "ru": (
-            "Демон не запущен — запусти `uv run tg daemon start`, потом `uv run tg "
+            "Демон не запущен — запусти `{cmd} daemon start`, потом `{cmd} "
             "capabilities`.\n\n"
         ),
     },
     "status.daemon_old_code": {
         "en": (
-            "The daemon is running an old version of the code — restart it: uv run tg daemon "
+            "The daemon is running an old version of the code — restart it: {cmd} daemon "
             "restart.\n\n"
         ),
-        "ru": "Демон работает на старой версии кода — перезапусти: uv run tg daemon restart.\n\n",
+        "ru": "Демон работает на старой версии кода — перезапусти: {cmd} daemon restart.\n\n",
     },
     "status.daemon_running": {
         "en": "running (pid {pid})",

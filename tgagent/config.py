@@ -13,11 +13,27 @@ from .i18n import t
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# A checkout and an installed wheel are told apart by the project file next to
+# the package: in a clone `tgagent/` sits inside the project, in site-packages it
+# does not. Getting this wrong is not cosmetic — state written next to an
+# installed package is inside site-packages, and the next upgrade or reinstall
+# takes the session with it.
+INSTALLED = not (ROOT / "pyproject.toml").exists()
+
+# Where `.env` and `data/` live when nothing overrides them. A clone keeps them
+# in the clone, where a person can see them; installed, there is no such place,
+# so the state gets a directory of its own that survives upgrades.
+HOME = Path.home() / ".tgagent" if INSTALLED else ROOT
+
+# The repository the package is installed from. Named here rather than in the
+# hints themselves, so a fork changes it in one place.
+REPO = "https://github.com/draiqw/tg-mcp"
+
 # Both locations are overridable so the same code runs from a checkout, from an
 # installed wheel and inside a container with a mounted volume.
-ENV_FILE = Path(os.environ.get("TG_ENV_FILE") or ROOT / ".env")
+ENV_FILE = Path(os.environ.get("TG_ENV_FILE") or HOME / ".env")
 load_dotenv(ENV_FILE, override=False)   # early, so TG_DATA_DIR may live in .env
-DATA = Path(os.environ.get("TG_DATA_DIR") or ROOT / "data")
+DATA = Path(os.environ.get("TG_DATA_DIR") or HOME / "data")
 
 SESSION = DATA / "session"          # Telethon appends .session; this is "main"
 SOCKET = DATA / "daemon.sock"
@@ -247,12 +263,47 @@ def list_accounts() -> list[str]:
     return found
 
 
+def command_prefix(*, cd: bool = False) -> str:
+    """How `tg` is spelled on this installation.
+
+    A hint that names the wrong command is worse than no hint: the person types
+    it, gets "command not found", and now has two problems. In a clone `tg` only
+    exists inside the project's environment, so it is reached through `uv run`;
+    installed as a package it is a console script already on PATH.
+
+    `cd` asks for a command that also works from another directory. It only adds
+    anything in a clone — `uv run` has to be run inside the project — and is left
+    out of the short form, which is what most hints want.
+    """
+    if INSTALLED:
+        return "tg"
+    return f"cd {ROOT} && uv run tg" if cd else "uv run tg"
+
+
+def whisper_command() -> str:
+    """How to add local transcription on this installation.
+
+    A clone has the extra declared in `pyproject.toml` and syncs it. Installed,
+    the extra cannot be named: resolving `tgagent[local-whisper]` would send uv
+    looking for `tgagent` on PyPI, where it is not published. So the two packages
+    behind the extra are asked for directly, and mlx only where it builds.
+    """
+    if not INSTALLED:
+        return "uv sync --extra local-whisper"
+    mlx = " --with mlx-whisper" if platform.system() == "Darwin" and _arm() else ""
+    return f"uv tool install --force --from git+{REPO}{mlx} --with faster-whisper tgagent"
+
+
+def _arm() -> bool:
+    return platform.machine().lower() in ("arm64", "aarch64")
+
+
 def login_command(account: str | None = None) -> str:
     """The exact sign-in command for a label. One for the whole code base: the error
     "account is not signed in" is useless if it says "sign in" instead of what to type."""
     label = normalize_account(account)
     tail = "" if label == MAIN_ACCOUNT else f" --account {label}"
-    return f"cd {ROOT} && uv run tg login{tail}"
+    return f"{command_prefix(cd=True)} login{tail}"
 
 
 def add_account_command() -> str:

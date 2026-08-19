@@ -111,6 +111,30 @@ def test_mcp_add_command_defaults_to_this_checkout() -> None:
     assert str(config.ROOT) in install.mcp_add_command()
 
 
+def test_mcp_add_command_has_no_directory_when_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Installed, the project directory is site-packages and pointing at it is wrong.
+
+    `tg-mcp` is a console script on PATH by then, so there is nothing to `--directory`
+    into — and `uv run` inside site-packages would not start at all.
+    """
+    monkeypatch.setattr(config, "INSTALLED", True)
+    cmd = install.mcp_add_command()
+    assert cmd[cmd.index("--") + 1:] == ["tg-mcp"]
+
+
+def test_a_clone_named_explicitly_is_registered_as_a_clone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A path that is not this installation is a checkout, whoever is asking."""
+    monkeypatch.setattr(config, "INSTALLED", True)
+    cmd = install.mcp_add_command("/home/someone/tg-agent")
+    assert cmd[cmd.index("--") + 1:] == [
+        "uv", "--directory", "/home/someone/tg-agent", "run", "tg-mcp",
+    ]
+
+
 def test_mcp_registered_without_claude_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
     # Not False: "there is no client" and "there is a client and no server in it"
     # are different things, and the wizard behaves differently on them.
@@ -620,6 +644,26 @@ def test_autostart_templates_have_no_leftover_placeholders(name: str) -> None:
     )
     assert "YOUR_USER" not in body
     assert "/opt/uv/bin/uv" in body and "/srv/telegram-mcp" in body
+
+
+@pytest.mark.parametrize("name", [install.PLIST_NAME, install.UNIT_NAME])
+def test_autostart_of_an_installed_package_runs_the_interpreter(name: str) -> None:
+    """No `uv run --directory` when there is no project to enter.
+
+    A unit pointing `uv run` at site-packages does not fail loudly — it fails at
+    sign-in, in the background, and the owner finds out when an alert does not
+    arrive. So the prefix collapses to the interpreter of the environment the
+    package lives in, which is all the daemon ever needed.
+    """
+    body = install.render_autostart(
+        (config.ROOT / name).read_text(),
+        "/opt/uv/bin/uv", "/home/someone/.tgagent", "/opt/venv/bin/python",
+    )
+    assert "YOUR_USER" not in body
+    assert "/opt/uv/bin/uv" not in body and "--directory" not in body
+    assert "/opt/venv/bin/python" in body
+    # The state paths still come from the second argument: that is where the log goes.
+    assert "/home/someone/.tgagent/data/daemon.log" in body
 
 
 def test_autostart_fix_speaks_of_systemd_on_linux() -> None:

@@ -141,7 +141,7 @@ every time: most often a leak arrives not in the code but in a fresh example in
 the documentation, copied off a real chat.
 
 ```bash
-grep -rInE 'СВОЙ_ТЕЛЕФОН|СВОЙ_ID|СВОЙ_USERNAME|СВОЁ_ИМЯ' \
+grep -rInE 'YOUR_PHONE|YOUR_ID|YOUR_USERNAME|YOUR_NAME' \
      --exclude-dir=.git --exclude-dir=.venv --exclude-dir=data --exclude=uv.lock .
 grep -rInE '[0-9]{8,10}:[A-Za-z0-9_-]{30,}|sk-[A-Za-z0-9_-]{20,}|gsk_[A-Za-z0-9]{20,}' \
      --exclude-dir=.git --exclude-dir=.venv --exclude-dir=data --exclude=uv.lock .

@@ -29,6 +29,9 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
+    # Two, and in this order: the code, the documentation and everything the model
+    # reads are English; what the owner reads is either, chosen by TG_LANG.
+    "Natural Language :: English",
     "Natural Language :: Russian",
     # The daemon talks to the MCP server over a unix socket, so Windows is not claimed.
     "Operating System :: POSIX",
@@ -116,6 +119,8 @@ select = [
     "B",      # flake8-bugbear: typical traps such as a mutable default argument
     "UP",     # pyupgrade: syntax per the declared requires-python = 3.11
     "ASYNC",  # blocking calls inside coroutines — a direct threat to the daemon's one loop
+    "RUF002", # a Cyrillic look-alike in a docstring — those are English here
+    "RUF003", # the same in a comment
     "RUF100", # a noqa that no longer suppresses anything
 ]
 
@@ -128,9 +133,12 @@ select = [
 #     Telegram is left without a client. The places where an exception really is
 #     swallowed for nothing are found by eye, not by a rule with a hundred false
 #     positives.
-#   RUF001-RUF003 — "ambiguous Unicode characters". The project's comments and
-#     docstrings were written in Russian, and the rule fired 600 times on
-#     Cyrillic.
+#   RUF001 — "ambiguous Unicode characters" in strings. tgagent/i18n.py holds the
+#     Russian half of the message catalog, which is two hundred deliberate hits,
+#     and a handful more are the aliases the owner types (see INDEX_SELF). Its
+#     siblings RUF002/RUF003, which guard docstrings and comments, ARE enabled:
+#     those are English everywhere, and a Cyrillic "с" that wandered into one is
+#     exactly the invisible typo the rule exists for.
 #   SIM, PERF, ANN, D — matters of taste and rewriting working code; the cleanup
 #     is meant as scaffolding, not as a refactoring.
 ignore = [

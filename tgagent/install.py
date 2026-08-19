@@ -30,6 +30,7 @@ import argparse
 import asyncio
 import filecmp
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -76,16 +77,43 @@ AUTOSTART_PLACEHOLDERS = (
 )
 
 
-def render_autostart(text: str, uv: str, root: Path | str) -> str:
+def render_autostart(text: str, uv: str, root: Path | str,
+                     python: str | None = None) -> str:
     """Substitute the real paths into an autostart template.
 
     Both pairs of placeholders are run over any template: that way one function
     serves both the plist and the unit, and adding a third form does not require
     a third branch.
+
+    `python` is for an installed package: there `uv run --directory` has no
+    project to enter, and a unit that boots into that would fail silently at every
+    sign-in — the one failure nobody sees. Given an interpreter, the whole `uv run
+    --directory <root> python` prefix collapses to it, which is what the daemon
+    needed in the first place.
     """
     for uv_token, root_token in AUTOSTART_PLACEHOLDERS:
+        if python:
+            text = _collapse_to_interpreter(text, uv_token, root_token, python)
         text = text.replace(uv_token, uv).replace(root_token, str(root))
     return text
+
+
+def _collapse_to_interpreter(text: str, uv_token: str, root_token: str, python: str) -> str:
+    """`uv run --directory <root> python` -> the interpreter itself, in both formats.
+
+    Done on the template, before the paths go in: the placeholders are what makes
+    the sequence findable at all. A format the pattern does not match is left
+    alone rather than half-rewritten.
+    """
+    plist = (
+        f"        <string>{uv_token}</string>\n"
+        "        <string>run</string>\n"
+        "        <string>--directory</string>\n"
+        f"        <string>{root_token}</string>\n"
+        "        <string>python</string>\n"
+    )
+    text = text.replace(plist, f"        <string>{python}</string>\n")
+    return text.replace(f"{uv_token} run --directory {root_token} python", python)
 
 
 def autostart_kind() -> str | None:
@@ -157,11 +185,17 @@ def mcp_add_command(root: Path | str | None = None, scope: str = "user",
     directory wrong. `--` separates the client options from the server command,
     and `uv --directory` is needed because the server starts from the client's
     project directory, not from here.
+
+    Installed as a package there is no project to point at: `tg-mcp` is a console
+    script on PATH, and `uv --directory site-packages run` would be both wrong and
+    unrunnable. A `root` pointing somewhere else is still registered the long way —
+    that is a clone, whoever is asking about it.
     """
-    return [
-        "claude", "mcp", "add", "-s", scope, name, "--",
-        "uv", "--directory", str(root or config.ROOT), "run", "tg-mcp",
-    ]
+    head = ["claude", "mcp", "add", "-s", scope, name, "--"]
+    here = Path(root) if root is not None else config.ROOT
+    if config.INSTALLED and here == config.ROOT:
+        return [*head, "tg-mcp"]
+    return [*head, "uv", "--directory", str(here), "run", "tg-mcp"]
 
 
 def _run(cmd: list[str], timeout: int = 60) -> tuple[int, str]:
@@ -338,7 +372,7 @@ def plan(st: dict) -> list[Step]:
             required=True, done=st["api"],
             detail=t("init.step_api_done"),
             cost=t("init.step_api_cost"),
-            fix="uv run tg setup",
+            fix=f"{config.command_prefix()} setup",
         ),
         Step(
             key="login", title=t("init.step_login_title"),
@@ -349,7 +383,7 @@ def plan(st: dict) -> list[Step]:
             required=True, done=st["session_exists"] and not st["login_pending"],
             detail=t("init.step_login_done", session=st["session"]),
             cost=t("init.step_login_cost"),
-            fix="uv run tg login",
+            fix=f"{config.command_prefix()} login",
         ),
         Step(
             key="bot", title=t("init.step_bot_title"),
@@ -377,14 +411,14 @@ def plan(st: dict) -> list[Step]:
             required=False, done=bool(st["local_whisper"]),
             detail=str(st["local_whisper"]),
             cost=t("init.step_local_whisper_cost"),
-            fix="uv sync --extra local-whisper",
+            fix=config.whisper_command(),
         ),
         Step(
             key="daemon", title=t("init.step_daemon_title"),
             required=True, done=bool(st["daemon_pid"]),
             detail=t("init.step_daemon_done", pid=st["daemon_pid"]),
             cost=t("init.step_daemon_cost"),
-            fix="uv run tg daemon start",
+            fix=f"{config.command_prefix()} daemon start",
         ),
         Step(
             key="mcp", title=t("init.step_mcp_title"),
@@ -476,7 +510,11 @@ def report(st: dict) -> list[dict]:
     add = rows.append
 
     sec_install = t("doctor.section_install")
-    add(_row("root", sec_install, _OK, t("doctor.root", path=st["root"])))
+    # "project directory" is a lie for a package: that path is site-packages, and the
+    # reader who goes there looking for their .env finds the code instead.
+    add(_row("root", sec_install, _OK, t(
+        "doctor.root_installed" if config.INSTALLED else "doctor.root", path=st["root"],
+    )))
     add(_row("python", sec_install, _OK, f"python {st['python']}"))
     add(_row(
         "uv", sec_install,
@@ -496,7 +534,7 @@ def report(st: dict) -> list[dict]:
         add(_row(
             "env", sec_install, _SKIP if st["api"] else _BAD,
             t("doctor.env_from_environment") if st["api"] else t("doctor.env_missing"),
-            None if st["api"] else "uv run tg init",
+            None if st["api"] else f"{config.command_prefix()} init",
         ))
     mode = st["data_mode"]
     add(_row(
@@ -525,7 +563,7 @@ def report(st: dict) -> list[dict]:
                    default=config.default_account())))
     else:
         add(_row("accounts", sec_accounts, _BAD, t("doctor.accounts_none"),
-                 "uv run tg login"))
+                 f"{config.command_prefix()} login"))
     if st["session_exists"]:
         mode = st["session_mode"]
         add(_row(
@@ -545,11 +583,11 @@ def report(st: dict) -> list[dict]:
         "daemon", sec_daemon, _OK if st["daemon_pid"] else _BAD,
         t("doctor.daemon_running", pid=st["daemon_pid"]) if st["daemon_pid"]
         else t("doctor.daemon_stopped"),
-        None if st["daemon_pid"] else "uv run tg daemon start",
+        None if st["daemon_pid"] else f"{config.command_prefix()} daemon start",
     ))
     if st["socket"] and not st["daemon_pid"]:
         add(_row("socket", sec_daemon, _BAD, t("doctor.socket_stale"),
-                 "uv run tg daemon restart"))
+                 f"{config.command_prefix()} daemon restart"))
     if "rpc" in st:
         rpc = st["rpc"]
         add(_row(
@@ -610,7 +648,7 @@ def report(st: dict) -> list[dict]:
         "local_whisper", sec_optional, _OK if st["local_whisper"] else _SKIP,
         t("doctor.whisper_ok", what=st["local_whisper"]) if st["local_whisper"]
         else t("doctor.whisper_missing"),
-        None if st["local_whisper"] else "uv sync --extra local-whisper",
+        None if st["local_whisper"] else config.whisper_command(),
     ))
     if st["autostart_kind"]:
         add(_row(
@@ -692,7 +730,7 @@ class Wizard:
         self.p(t("init.api_intro"))
         if not self.interactive:
             self.p(t("init.needs_terminal_keys"))
-            self.p(f"   cd {config.ROOT} && uv run tg init")
+            self.p(f"   {config.command_prefix(cd=True)} init")
             return 1
         values = cli.prompt_api_credentials()
         if not values:
@@ -706,7 +744,7 @@ class Wizard:
 
         if self.state["login_pending"]:
             self.p(t("init.login_pending"))
-            self.p("   uv run tg password")
+            self.p(f"   {config.command_prefix()} password")
             return 1
         self.p(t("init.login_intro"))
         self.p("")
@@ -714,7 +752,7 @@ class Wizard:
         self.p("")
         if not self.interactive:
             self.p(t("init.needs_terminal_login"))
-            self.p(f"   cd {config.ROOT} && uv run tg init")
+            self.p(f"   {config.command_prefix(cd=True)} init")
             return 1
         try:
             code = cli.cmd_login(argparse.Namespace(account=self.account, brief=True))
@@ -787,10 +825,13 @@ class Wizard:
 
     def step_local_whisper(self, step: Step) -> int:
         self.p(t("init.local_whisper_intro"))
-        if not self.yes(t("init.local_whisper_ask")):
+        if not self.yes(t("init.local_whisper_ask", command=config.whisper_command())):
             self.skip(step)
             return 0
-        code, out = _run(["uv", "sync", "--extra", "local-whisper"], timeout=900)
+        # Split rather than hard-coded: the command differs between a clone and an
+        # installed package, and running the clone's one from a package would
+        # fail on a pyproject.toml that is not there.
+        code, out = _run(shlex.split(config.whisper_command()), timeout=900)
         if code:
             self.p("   " + t("init.install_failed", why=out.splitlines()[-1] if out else code))
             self.p("   " + t("init.optional_continue"))
@@ -884,7 +925,12 @@ class Wizard:
             self.skipped.append(f"{step.title}: {step.fix}")
             return 0
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(render_autostart(template.read_text(), uv, config.ROOT))
+        # config.HOME, not ROOT: the unit also names the log, and installed the log
+        # is in ~/.tgagent, not next to the package.
+        target.write_text(render_autostart(
+            template.read_text(), uv, config.HOME,
+            sys.executable if config.INSTALLED else None,
+        ))
         code, out = self._enable_autostart(kind, target)
         if code:
             self.p("   " + t("init.autostart_not_enabled", path=target, why=out or code))

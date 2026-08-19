@@ -30,7 +30,7 @@ def _onboarding(title: str, account: str | None = None) -> None:
 
     Printed where a person has just configured something and does not understand
     what exactly they got. The same text is available on its own:
-    `uv run tg capabilities`.
+    `tg capabilities`.
     """
     _p("\n" + "─" * 60)
     _p(title + "\n")

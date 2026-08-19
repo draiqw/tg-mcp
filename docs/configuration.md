@@ -9,6 +9,12 @@ itself. To fill them in without remembering the variable names, use the wizard:
 `uv run tg init` asks only for what is missing, and `uv run tg doctor` then shows
 which of this list is set and what permissions the file has.
 
+"Next to the code" means the clone. Installed as a package there is no such
+place — next to the code is `site-packages`, and the next upgrade rewrites it —
+so `.env` and `data/` move to `~/.tgagent` instead; see
+[install.md](install.md#without-a-clone). `tg doctor` prints the paths it
+actually used, which is the answer to "where is my session".
+
 | Variable | Required | What it is |
 |---|---|---|
 | `TG_API_ID` | yes | app id from my.telegram.org |
@@ -17,7 +23,7 @@ which of this list is set and what permissions the file has.
 | `TG_ALERT_CHAT_ID` | for alerts | where to send; filled in by `tg link-bot` |
 | `TG_ALLOW_WRITE` | no (1 by default) | `0` — read-only mode |
 | `TG_LANG` | no (`en` by default) | language of what the owner reads: `en` or `ru` |
-| `TG_DATA_DIR` | no | where the state lives; `./data` by default, `/data` in docker |
+| `TG_DATA_DIR` | no | where the state lives; `./data` in a clone, `~/.tgagent/data` installed, `/data` in docker |
 | `TG_ENV_FILE` | no | a non-standard location of `.env` itself |
 
 `TG_API_ID` and `TG_API_HASH` are the MTProto keys. Without them only the Bot API
@@ -400,6 +406,12 @@ to `uv` and to the project directory into the template, and enables the service.
 In both templates the paths are placeholders with `YOUR_USER`, and substituting
 them is mandatory: the project works from any directory, and the service is
 started without your shell and expands no `~` at all.
+
+Installed as a package the wizard writes a different command into the same
+templates: `uv run --directory` has no project to enter there, so the service
+starts the interpreter of the environment the package lives in — the same daemon,
+one process shorter. That is worth knowing if you compare your unit with the one
+below and find no `uv` in it.
 
 ### macOS (launchd)
 

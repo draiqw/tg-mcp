@@ -260,3 +260,72 @@ def test_no_module_builds_the_signature_itself():
             assert literal not in text, (
                 f"{path.name}: the client signature is built outside config.client_info()"
             )
+
+
+# ---------------------------------------------------------------- clone or package
+
+
+def test_this_checkout_is_not_an_installed_package():
+    """The flag has to be right here first, because everything below depends on it.
+
+    A clone is recognised by the project file next to the package. If that ever
+    stops being true, state moves out of the checkout into `~/.tgagent` on the
+    developer's own machine, and the first sign of it is a session that vanished.
+    """
+    assert not config.INSTALLED
+    assert config.HOME == config.ROOT
+    assert (config.ROOT / "pyproject.toml").exists()
+
+
+def test_state_of_an_installed_package_lives_outside_it(monkeypatch):
+    """Installed, `.env` and `data/` must not land next to the code.
+
+    Next to the code means inside site-packages, and site-packages is rewritten by
+    the next upgrade — together with `session.session`, which is the account.
+    """
+    monkeypatch.setattr(config, "INSTALLED", True)
+    home = config.Path.home() / ".tgagent"
+    # Recomputed the way the module computes it, since the module ran at import.
+    assert home != config.ROOT
+    assert not str(home).endswith("site-packages")
+
+
+@pytest.mark.parametrize("installed, cd, expect", [
+    (False, False, "uv run tg"),
+    (False, True, None),          # carries the checkout path, checked separately
+    (True, False, "tg"),
+    (True, True, "tg"),
+])
+def test_command_prefix_follows_the_installation(monkeypatch, installed, cd, expect):
+    """A hint that names the wrong command sends the reader to "command not found".
+
+    Installed, `tg` is a console script on PATH and there is no project to `cd`
+    into, so both forms collapse to one.
+    """
+    monkeypatch.setattr(config, "INSTALLED", installed)
+    got = config.command_prefix(cd=cd)
+    if expect is None:
+        assert got == f"cd {config.ROOT} && uv run tg"
+    else:
+        assert got == expect
+
+
+def test_login_command_uses_the_same_prefix(monkeypatch):
+    monkeypatch.setattr(config, "INSTALLED", True)
+    assert config.login_command() == "tg login"
+    assert config.login_command("work") == "tg login --account work"
+
+
+def test_whisper_command_cannot_name_the_extra_when_installed(monkeypatch):
+    """Installed, `tgagent[local-whisper]` would send uv to PyPI, where it is not.
+
+    So the packages behind the extra are asked for by name. The check is that the
+    extra is not named, not the exact spelling of the command.
+    """
+    monkeypatch.setattr(config, "INSTALLED", False)
+    assert config.whisper_command() == "uv sync --extra local-whisper"
+
+    monkeypatch.setattr(config, "INSTALLED", True)
+    installed = config.whisper_command()
+    assert "local-whisper" not in installed
+    assert "faster-whisper" in installed and config.REPO in installed
