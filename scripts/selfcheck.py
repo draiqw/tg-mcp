@@ -41,7 +41,11 @@ def mcp_tools() -> dict[str, str]:
         decorated = False
         for d in node.decorator_list:
             target = d.func if isinstance(d, ast.Call) else d
+            # `@mcp.tool` and the module's own `@tool` wrapper around it — the
+            # wrapper is what turns the structured half of every answer off.
             if isinstance(target, ast.Attribute) and target.attr == "tool":
+                decorated = True
+            if isinstance(target, ast.Name) and target.id == "tool":
                 decorated = True
         if not decorated:
             continue

@@ -103,7 +103,29 @@ def _try_autostart() -> None:
 
 
 def j(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, indent=2, default=str)
+    """The answer as the model receives it: JSON with no space it does not need.
+
+    Indentation was here for a while and it is not free — the reader is a model
+    paying by the token, and pretty-printing a list of forty messages costs a
+    quarter of the answer in leading spaces and newlines that carry nothing. JSON
+    is as parseable without them, and nothing downstream reads this by eye: `tg
+    call` and the CLI print their own formatted copy for a person.
+    """
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def tool(*args: Any, **kwargs: Any):
+    """`mcp.tool`, minus the structured half of every answer.
+
+    Every tool here answers with an opaque JSON string, and FastMCP sees the `->
+    str` annotation and helpfully sends that string a second time, wrapped as
+    `{"result": ...}`, plus an output schema per tool in the listing. For a typed
+    return value that would be the useful half; for a string in a box it is the
+    same bytes twice — measured, an exact doubling of every answer the account
+    ever returns. The text half is what the model reads.
+    """
+    kwargs.setdefault("structured_output", False)
+    return mcp.tool(*args, **kwargs)
 
 
 # --------------------------------------------------------------------------
@@ -111,13 +133,13 @@ def j(value: Any) -> str:
 # --------------------------------------------------------------------------
 
 
-@mcp.tool()
+@tool()
 async def tg_status() -> str:
     """Daemon and account status: who is signed in, alert rules, write permission."""
     return j(await call("status"))
 
 
-@mcp.tool()
+@tool()
 async def tg_accounts(access: bool = True) -> str:
     """Which Telegram accounts this daemon holds, and which one your calls go to.
 
@@ -144,7 +166,7 @@ async def tg_accounts(access: bool = True) -> str:
     return j(await call("accounts", access=access))
 
 
-@mcp.tool()
+@tool()
 async def tg_account_use(account: str, persist: bool = False) -> str:
     """Point the following tool calls at this account ("main" for the default one).
 
@@ -177,7 +199,7 @@ async def tg_account_use(account: str, persist: bool = False) -> str:
     return j(res)
 
 
-@mcp.tool()
+@tool()
 async def tg_dialogs(
     limit: int = 30,
     unread_only: bool = False,
@@ -205,7 +227,7 @@ async def tg_dialogs(
                         archived=archived, query=query, kind=kind))
 
 
-@mcp.tool()
+@tool()
 async def tg_structure(sample: int = 0) -> str:
     """Map of the whole account in one call: how many chats of each type, how many
     unread, what is pinned, what sits in the archive, and every folder with its
@@ -218,7 +240,7 @@ async def tg_structure(sample: int = 0) -> str:
     return j(await call("structure", sample=sample))
 
 
-@mcp.tool()
+@tool()
 async def tg_folders() -> str:
     """Telegram folders (chat filters) and which chats each one holds.
 
@@ -228,7 +250,7 @@ async def tg_folders() -> str:
     return j(await call("folders"))
 
 
-@mcp.tool()
+@tool()
 async def tg_unread(
     limit_chats: int = 20, per_chat: int = 5, archived: bool | None = None
 ) -> str:
@@ -247,7 +269,7 @@ async def tg_unread(
                         archived=archived))
 
 
-@mcp.tool()
+@tool()
 async def tg_pending(
     limit: int = 30,
     direction: str = "theirs",
@@ -286,7 +308,7 @@ async def tg_pending(
                         include_bots=include_bots))
 
 
-@mcp.tool()
+@tool()
 async def tg_history(
     chat: str,
     limit: int = 40,
@@ -314,7 +336,7 @@ async def tg_history(
                         saved_from=saved_from))
 
 
-@mcp.tool()
+@tool()
 async def tg_history_batch(chats: list[str], limit: int = 20, search: str | None = None) -> str:
     """Read several chats in one call (up to 25). Use this instead of calling
     tg_history repeatedly when comparing or summarising multiple conversations.
@@ -327,7 +349,7 @@ async def tg_history_batch(chats: list[str], limit: int = 20, search: str | None
     return j(await call("history_batch", chats=chats, limit=limit, search=search))
 
 
-@mcp.tool()
+@tool()
 async def tg_media(
     chat: str, kind: str = "media", limit: int = 30, before_id: int | None = None
 ) -> str:
@@ -346,7 +368,7 @@ async def tg_media(
     return j(await call("media", chat=chat, kind=kind, limit=limit, before_id=before_id))
 
 
-@mcp.tool()
+@tool()
 async def tg_view(
     chat: str,
     message_id: int | None = None,
@@ -372,7 +394,7 @@ async def tg_view(
     return Image(path=info["path"])
 
 
-@mcp.tool()
+@tool()
 async def tg_transcribe(
     chat: str,
     message_ids: list[int] | None = None,
@@ -401,7 +423,7 @@ async def tg_transcribe(
                         limit=limit, engine=engine, language=language))
 
 
-@mcp.tool()
+@tool()
 async def tg_translate(
     to_lang: str,
     chat: str | None = None,
@@ -420,7 +442,7 @@ async def tg_translate(
                         message_ids=message_ids, text=text))
 
 
-@mcp.tool()
+@tool()
 async def tg_download_many(chat: str, message_ids: list[int], dest: str | None = None) -> str:
     """Download several attachments at once (max 50). Get the ids from tg_media.
 
@@ -432,7 +454,7 @@ async def tg_download_many(chat: str, message_ids: list[int], dest: str | None =
     return j(await call("download_many", chat=chat, message_ids=message_ids, dest=dest))
 
 
-@mcp.tool()
+@tool()
 async def tg_stickers(scope: str = "sets", set: str | None = None, limit: int = 60) -> str:
     """Sticker packs and GIFs on the account.
 
@@ -445,7 +467,7 @@ async def tg_stickers(scope: str = "sets", set: str | None = None, limit: int = 
     return j(await call("stickers", scope=scope, set=set, limit=limit))
 
 
-@mcp.tool()
+@tool()
 async def tg_topics(chat: str, limit: int = 50, query: str | None = None) -> str:
     """Forum topics of a supergroup: id, title, unread count, closed/pinned state.
 
@@ -454,7 +476,7 @@ async def tg_topics(chat: str, limit: int = 50, query: str | None = None) -> str
     return j(await call("topics", chat=chat, limit=limit, query=query))
 
 
-@mcp.tool()
+@tool()
 async def tg_admin_log(
     chat: str, limit: int = 50, query: str = "", admins: list[str] | None = None
 ) -> str:
@@ -470,7 +492,7 @@ async def tg_admin_log(
     return j(await call("admin_log", chat=chat, limit=limit, query=query, admins=admins))
 
 
-@mcp.tool()
+@tool()
 async def tg_invites(
     chat: str, link: str | None = None, limit: int = 50, revoked: bool = False
 ) -> str:
@@ -488,21 +510,21 @@ async def tg_invites(
     return j(await call("invites", chat=chat, link=link, limit=limit, revoked=revoked))
 
 
-@mcp.tool()
+@tool()
 async def tg_bot_info(bot: str, lang_code: str = "") -> str:
     """Name, about and description of a bot you own, plus its command list when the
     bot is this agent's own bot."""
     return j(await call("bot_info", bot=bot, lang_code=lang_code))
 
 
-@mcp.tool()
+@tool()
 async def tg_cache_clear(downloads: bool = False) -> str:
     """Drop the cached chat-title index (use after chats are renamed), and
     optionally delete everything in data/downloads."""
     return j(await call("cache_clear", downloads=downloads))
 
 
-@mcp.tool()
+@tool()
 async def tg_search(
     query: str = "",
     chat: str | None = None,
@@ -546,7 +568,7 @@ async def tg_search(
                         engine=engine, author=author))
 
 
-@mcp.tool()
+@tool()
 async def tg_index(
     action: str = "sync",
     chats: list[str] | None = None,
@@ -574,7 +596,7 @@ async def tg_index(
     return j(await call("index", action=action, chats=chats, since=since, limit=limit))
 
 
-@mcp.tool()
+@tool()
 async def tg_memory(
     chat: str | None = None,
     action: str = "show",
@@ -609,7 +631,7 @@ async def tg_memory(
     return j(await call("memory", chat=chat, action=action, limit=limit, model=model))
 
 
-@mcp.tool()
+@tool()
 async def tg_saved_tags() -> str:
     """Tags used in Saved Messages, with how many messages carry each one.
 
@@ -618,7 +640,7 @@ async def tg_saved_tags() -> str:
     return j(await call("saved_tags"))
 
 
-@mcp.tool()
+@tool()
 async def tg_mentions(limit: int = 20, kind: str = "mentions") -> str:
     """Unread messages that mention you, or unread reactions to your messages.
 
@@ -631,7 +653,7 @@ async def tg_mentions(limit: int = 20, kind: str = "mentions") -> str:
     return j(await call("mentions", limit=limit, kind=kind))
 
 
-@mcp.tool()
+@tool()
 async def tg_chat_info(chat: str, counters: bool = True, similar: bool = False) -> str:
     """Details about a chat or person: id, username, type, member count, bio.
 
@@ -650,7 +672,7 @@ async def tg_chat_info(chat: str, counters: bool = True, similar: bool = False) 
     return j(await call("chat_info", chat=chat, counters=counters, similar=similar))
 
 
-@mcp.tool()
+@tool()
 async def tg_participants(chat: str, limit: int = 50, query: str | None = None) -> str:
     """Members of a group or channel with everything needed to reach them:
     @username, a direct link to the private chat with that person, phone when
@@ -665,7 +687,7 @@ async def tg_participants(chat: str, limit: int = 50, query: str | None = None) 
     return j(await call("participants", chat=chat, limit=limit, query=query))
 
 
-@mcp.tool()
+@tool()
 async def tg_contacts(
     query: str | None = None, limit: int = 50, kind: str = "all"
 ) -> str:
@@ -685,13 +707,13 @@ async def tg_contacts(
     return j(await call("contacts", query=query, limit=limit, kind=kind))
 
 
-@mcp.tool()
+@tool()
 async def tg_download(chat: str, message_id: int, dest: str | None = None) -> str:
     """Download the media attached to one message. Defaults to the project's data/downloads."""
     return j(await call("download", chat=chat, message_id=message_id, dest=dest))
 
 
-@mcp.tool()
+@tool()
 async def tg_message(
     chat: str, message_id: int, context: int = 0, replies: int = 0
 ) -> str:
@@ -712,7 +734,7 @@ async def tg_message(
                         context=context, replies=replies))
 
 
-@mcp.tool()
+@tool()
 async def tg_resolve(link: str) -> str:
     """Say what a Telegram link or phone number points at, without opening,
     joining or saving anything.
@@ -731,14 +753,14 @@ async def tg_resolve(link: str) -> str:
     return j(await call("resolve_link", link=link))
 
 
-@mcp.tool()
+@tool()
 async def tg_common_chats(user: str, limit: int = 50) -> str:
     """Groups and channels you and this person are both in. Good for "where do we
     overlap" and for placing an unknown contact."""
     return j(await call("common_chats", user=user, limit=limit))
 
 
-@mcp.tool()
+@tool()
 async def tg_person(user: str, messages: int = 20, chats: int = 10) -> str:
     """Everything the account knows about one person, in a single call. Use this
     before writing to someone instead of chaining tg_chat_info, tg_contacts,
@@ -763,13 +785,13 @@ async def tg_person(user: str, messages: int = 20, chats: int = 10) -> str:
     return j(await call("person", user=user, messages=messages, chats=chats))
 
 
-@mcp.tool()
+@tool()
 async def tg_drafts() -> str:
     """Every unsent draft in the account, with the chat it belongs to."""
     return j(await call("drafts"))
 
 
-@mcp.tool()
+@tool()
 async def tg_scheduled(chat: str, limit: int = 30, cancel_ids: list[int] | None = None) -> str:
     """Messages scheduled for later in a chat. Pass cancel_ids to cancel them.
 
@@ -781,7 +803,7 @@ async def tg_scheduled(chat: str, limit: int = 30, cancel_ids: list[int] | None 
     return j(await call("scheduled", chat=chat, limit=limit, cancel_ids=cancel_ids))
 
 
-@mcp.tool()
+@tool()
 async def tg_export(
     chat: str | None = None,
     limit: int = 1000,
@@ -817,7 +839,7 @@ async def tg_export(
                         media_max_mb=media_max_mb))
 
 
-@mcp.tool()
+@tool()
 async def tg_click(chat: str, message_id: int, button: str | None = None) -> str:
     """Inline keyboard under a bot's message: call without `button` to see the
     buttons, with it to press one (by exact-ish text or by index).
@@ -828,7 +850,7 @@ async def tg_click(chat: str, message_id: int, button: str | None = None) -> str
     return j(await call("click", chat=chat, message_id=message_id, button=button))
 
 
-@mcp.tool()
+@tool()
 async def tg_events(limit: int = 50, since: str | None = None) -> str:
     """Recent incoming messages captured by the watcher, newest last.
 
@@ -839,7 +861,7 @@ async def tg_events(limit: int = 50, since: str | None = None) -> str:
     return j(await call("events", limit=limit, since=since))
 
 
-@mcp.tool()
+@tool()
 async def tg_actions(
     limit: int = 50,
     since: str | None = None,
@@ -867,7 +889,7 @@ async def tg_actions(
 # --------------------------------------------------------------------------
 
 
-@mcp.tool()
+@tool()
 async def tg_send(
     chat: str,
     text: str,
@@ -888,7 +910,7 @@ async def tg_send(
     return j(await call("send", chat=chat, text=text, reply_to=reply_to, silent=silent))
 
 
-@mcp.tool()
+@tool()
 async def tg_send_file(
     chat: str,
     path: str | list[str],
@@ -909,13 +931,13 @@ async def tg_send_file(
                         voice=voice, silent=silent))
 
 
-@mcp.tool()
+@tool()
 async def tg_send_location(chat: str, latitude: float, longitude: float) -> str:
     """Send a location pin as the user."""
     return j(await call("send_location", chat=chat, latitude=latitude, longitude=longitude))
 
 
-@mcp.tool()
+@tool()
 async def tg_schedule(chat: str, text: str, when: str, reply_to: int | None = None) -> str:
     """Send a message later. Telegram delivers it even if this machine is off.
 
@@ -929,7 +951,7 @@ async def tg_schedule(chat: str, text: str, when: str, reply_to: int | None = No
     return j(await call("schedule", chat=chat, text=text, when=when, reply_to=reply_to))
 
 
-@mcp.tool()
+@tool()
 async def tg_draft(
     chat: str, text: str | None = None, reply_to: int | None = None, clear: bool = False
 ) -> str:
@@ -943,7 +965,7 @@ async def tg_draft(
     return j(await call("draft", chat=chat, text=text, reply_to=reply_to, clear=clear))
 
 
-@mcp.tool()
+@tool()
 async def tg_react(chat: str, message_id: int, emoji: str | None = None, big: bool = False) -> str:
     """React to a message with an emoji. Omit `emoji` to remove your reaction.
 
@@ -953,7 +975,7 @@ async def tg_react(chat: str, message_id: int, emoji: str | None = None, big: bo
     return j(await call("react", chat=chat, message_id=message_id, emoji=emoji, big=big))
 
 
-@mcp.tool()
+@tool()
 async def tg_pin_message(
     chat: str, message_id: int, unpin: bool = False, notify: bool = False
 ) -> str:
@@ -963,7 +985,7 @@ async def tg_pin_message(
                         unpin=unpin, notify=notify))
 
 
-@mcp.tool()
+@tool()
 async def tg_poll(
     chat: str,
     question: str,
@@ -986,7 +1008,7 @@ async def tg_poll(
                         multiple=multiple, quiz_answer=quiz_answer, anonymous=anonymous))
 
 
-@mcp.tool()
+@tool()
 async def tg_send_sticker(
     chat: str,
     scope: str = "faved",
@@ -1009,13 +1031,13 @@ async def tg_send_sticker(
                         index=index, emoji=emoji, reply_to=reply_to))
 
 
-@mcp.tool()
+@tool()
 async def tg_topic_create(chat: str, title: str, icon_emoji_id: int | None = None) -> str:
     """Create a forum topic in a supergroup that has topics enabled."""
     return j(await call("topic_create", chat=chat, title=title, icon_emoji_id=icon_emoji_id))
 
 
-@mcp.tool()
+@tool()
 async def tg_topic_edit(
     chat: str,
     topic_id: int,
@@ -1029,7 +1051,7 @@ async def tg_topic_edit(
                         closed=closed, hidden=hidden, pinned=pinned))
 
 
-@mcp.tool()
+@tool()
 async def tg_bot_edit(
     bot: str,
     name: str | None = None,
@@ -1048,13 +1070,13 @@ async def tg_bot_edit(
                         description=description, commands=commands, lang_code=lang_code))
 
 
-@mcp.tool()
+@tool()
 async def tg_block(user: str, unblock: bool = False) -> str:
     """Block a user, or unblock with unblock=true."""
     return j(await call("block", user=user, unblock=unblock))
 
 
-@mcp.tool()
+@tool()
 async def tg_contact_edit(
     phone: str | None = None,
     name: str | None = None,
@@ -1076,7 +1098,7 @@ async def tg_contact_edit(
                         user=user, delete=delete, note=note))
 
 
-@mcp.tool()
+@tool()
 async def tg_create_group(
     title: str, users: list[str] | None = None, kind: str = "group", about: str = ""
 ) -> str:
@@ -1091,7 +1113,7 @@ async def tg_create_group(
     return j(await call("create_group", title=title, users=users, kind=kind, about=about))
 
 
-@mcp.tool()
+@tool()
 async def tg_invite(
     chat: str, users: list[str] | None = None, link: bool = False, revoke: bool = False
 ) -> str:
@@ -1106,7 +1128,7 @@ async def tg_invite(
     return j(await call("invite", chat=chat, users=users, link=link, revoke=revoke))
 
 
-@mcp.tool()
+@tool()
 async def tg_moderate(chat: str, user: str, action: str) -> str:
     """Moderate a group member: kick, ban, unban, promote, demote, approve, decline.
 
@@ -1118,7 +1140,7 @@ async def tg_moderate(chat: str, user: str, action: str) -> str:
     return j(await call("moderate", chat=chat, user=user, action=action))
 
 
-@mcp.tool()
+@tool()
 async def tg_chat_edit(
     chat: str,
     title: str | None = None,
@@ -1147,14 +1169,14 @@ async def tg_chat_edit(
                         slowmode=slowmode, permissions=permissions, forum=forum))
 
 
-@mcp.tool()
+@tool()
 async def tg_leave(chat: str, delete: bool = False) -> str:
     """Leave a group or channel. For a private chat, delete=true erases the
     conversation on your side and is not recoverable — ask first."""
     return j(await call("leave", chat=chat, delete=delete))
 
 
-@mcp.tool()
+@tool()
 async def tg_folder_edit(
     folder: str | None = None,
     add: list[str] | None = None,
@@ -1189,25 +1211,25 @@ async def tg_folder_edit(
                         rules=rules, exclude=exclude))
 
 
-@mcp.tool()
+@tool()
 async def tg_edit(chat: str, message_id: int, text: str) -> str:
     """Edit one of your own sent messages."""
     return j(await call("edit", chat=chat, message_id=message_id, text=text))
 
 
-@mcp.tool()
+@tool()
 async def tg_delete(chat: str, message_ids: list[int], revoke: bool = True) -> str:
     """Delete messages. revoke=True removes them for everyone. Not recoverable."""
     return j(await call("delete", chat=chat, message_ids=message_ids, revoke=revoke))
 
 
-@mcp.tool()
+@tool()
 async def tg_forward(from_chat: str, message_ids: list[int], to_chat: str) -> str:
     """Forward messages from one chat to another."""
     return j(await call("forward", from_chat=from_chat, message_ids=message_ids, to_chat=to_chat))
 
 
-@mcp.tool()
+@tool()
 async def tg_mark_read(
     chat: str, clear_mentions: bool = True, unread: bool = False
 ) -> str:
@@ -1223,19 +1245,19 @@ async def tg_mark_read(
                         unread=unread))
 
 
-@mcp.tool()
+@tool()
 async def tg_mute(chat: str, hours: int | None = None, unmute: bool = False) -> str:
     """Mute a chat for N hours (default: indefinitely), or unmute it."""
     return j(await call("mute", chat=chat, hours=hours, unmute=unmute))
 
 
-@mcp.tool()
+@tool()
 async def tg_archive(chat: str, undo: bool = False) -> str:
     """Move a chat to the archive, or back out of it."""
     return j(await call("archive", chat=chat, undo=undo))
 
 
-@mcp.tool()
+@tool()
 async def tg_pin(chat: str, unpin: bool = False) -> str:
     """Pin a chat to the top of the list, or unpin it."""
     return j(await call("pin", chat=chat, unpin=unpin))
@@ -1246,13 +1268,13 @@ async def tg_pin(chat: str, unpin: bool = False) -> str:
 # --------------------------------------------------------------------------
 
 
-@mcp.tool()
+@tool()
 async def tg_alert(text: str) -> str:
     """Send the user a notification through the agent's own bot (not their chats)."""
     return j(await call("alert", text=text))
 
 
-@mcp.tool()
+@tool()
 async def tg_rules(patch: dict) -> str:
     """Update alert rules. Keys: enabled, alert_on_private, alert_on_mention,
     keywords (list), watch_chats (list), mute_chats (list), ignore_bots,
@@ -1276,7 +1298,7 @@ async def tg_rules(patch: dict) -> str:
     return j(await call("rules", patch=patch))
 
 
-@mcp.tool()
+@tool()
 async def tg_activity(
     since: str | None = None,
     until: str | None = None,
@@ -1326,7 +1348,7 @@ async def tg_activity(
                         chat=chat, limit_days=limit_days))
 
 
-@mcp.tool()
+@tool()
 async def tg_notify(
     chat: str | None = None,
     scope: str | None = None,
@@ -1362,7 +1384,7 @@ async def tg_notify(
                         exceptions=exceptions))
 
 
-@mcp.tool()
+@tool()
 async def tg_stories(
     peer: str | None = None,
     mark_read: bool = False,
@@ -1385,7 +1407,7 @@ async def tg_stories(
                         download=download, limit=limit))
 
 
-@mcp.tool()
+@tool()
 async def tg_summarize(
     chat: str, message_ids: list[int], to_lang: str | None = None
 ) -> str:
@@ -1405,7 +1427,7 @@ async def tg_summarize(
                         to_lang=to_lang))
 
 
-@mcp.tool()
+@tool()
 async def tg_limits(full: bool = False) -> str:
     """What this account is allowed to do: Premium flag and the server-side
     ceilings that go with it.
@@ -1425,7 +1447,7 @@ async def tg_limits(full: bool = False) -> str:
     return j(await call("limits", full=full))
 
 
-@mcp.tool()
+@tool()
 async def tg_capabilities(
     chat: str | None = None,
     account: str | None = None,
@@ -1469,7 +1491,7 @@ async def tg_capabilities(
                         all_accounts=all_accounts))
 
 
-@mcp.tool()
+@tool()
 async def tg_sessions(terminate: int | None = None) -> str:
     """Devices where this Telegram account is logged in: model, app, IP, country,
     when each was last active.
@@ -1486,7 +1508,7 @@ async def tg_sessions(terminate: int | None = None) -> str:
     return j(await call("sessions", terminate=terminate))
 
 
-@mcp.tool()
+@tool()
 async def tg_wait(
     chat: str | None = None,
     from_user: str | None = None,
@@ -1514,7 +1536,7 @@ async def tg_wait(
                         timeout=timeout, private_only=private_only))
 
 
-@mcp.tool()
+@tool()
 async def tg_ask(
     question: str, options: list[str] | None = None, timeout: int = 300
 ) -> str:
@@ -1535,7 +1557,7 @@ async def tg_ask(
     return j(await call("ask", question=question, options=options, timeout=timeout))
 
 
-@mcp.tool()
+@tool()
 async def tg_remind(
     text: str | None = None,
     when: str | None = None,
@@ -1565,6 +1587,41 @@ async def tg_remind(
     """
     return j(await call("remind", text=text, when=when, chat=chat,
                         unless_reply=unless_reply, list=list, cancel=cancel))
+
+
+def compact_schema(node: Any) -> Any:
+    """The same argument schema, minus what only a form generator would read.
+
+    Pydantic writes a schema meant for building a UI; the reader here is a model
+    that already has the parameter name and the docstring. Two things go:
+
+    `title` — "Chat" next to a property literally called `chat`, on every
+    argument of all seventy-nine tools.
+
+    `anyOf: [X, null]` with `default: null` — how an optional argument is spelled
+    in Python, at four times the width of `{"type": "X"}`. What the model needs to
+    know is the type and whether it may be left out, and the second half is in
+    `required`, where its absence already says so. Passing an explicit null still
+    works: validation runs against the function's own model, not against this.
+
+    A branch the pattern does not match is returned untouched — a schema this
+    does not understand is left alone rather than half-rewritten.
+    """
+    if isinstance(node, list):
+        return [compact_schema(v) for v in node]
+    if not isinstance(node, dict):
+        return node
+    out = {k: v for k, v in node.items() if k != "title"}
+    branches = [b for b in out.get("anyOf", []) if b.get("type") != "null"]
+    if len(branches) == 1 and len(out.get("anyOf", [])) == 2 and out.get("default", 0) is None:
+        out = {k: v for k, v in out.items() if k not in ("anyOf", "default")} | branches[0]
+    if out.get("default", 0) is None:
+        out = {k: v for k, v in out.items() if k != "default"}
+    return {k: compact_schema(v) for k, v in out.items()}
+
+
+for _tool in mcp._tool_manager._tools.values():
+    _tool.parameters = compact_schema(_tool.parameters)
 
 
 def main() -> None:

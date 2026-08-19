@@ -95,7 +95,14 @@ class RateGuard:
 
 
 def _iso(dt: datetime | None) -> str | None:
-    return dt.astimezone(UTC).isoformat() if dt else None
+    """UTC, ISO-8601, with the zone written as `Z`.
+
+    `isoformat()` spells UTC as `+00:00`. `Z` says the same thing in one
+    character instead of six, and every parser that reads one reads the other.
+    Six characters is nothing until you count the timestamps in an answer about
+    forty messages, all of which somebody pays for by the token.
+    """
+    return dt.astimezone(UTC).isoformat().replace("+00:00", "Z") if dt else None
 
 
 def _media_kind(msg) -> str | None:
@@ -353,12 +360,17 @@ def entity_name(entity) -> str:
         return str(getattr(entity, "id", "?"))
 
 
-def _links(msg) -> list[str] | None:
-    """Links from the text: both bare urls and the ones hidden behind a label.
+def _links(msg, *, bare: bool = False) -> list[str] | None:
+    """Links from the text: the ones hidden behind a label, and optionally the plain ones.
 
     Telegram counts entity offsets in UTF-16, while Python slices a string by
     code points: without converting to surrogates any emoji above the BMP shifts
     the slicing and the link arrives cut off.
+
+    `bare` is about who is reading. Alongside the full text a plain url is a
+    second copy of characters already on the page — on a channel that posts links
+    that is a quarter of the answer. Where the text is cut short, or where the
+    links are the answer rather than a detail of it, they have to be listed.
     """
     text = add_surrogate(msg.message or "")
 
@@ -369,9 +381,15 @@ def _links(msg) -> list[str] | None:
     for e in msg.entities or []:
         name = type(e).__name__
         if name == "MessageEntityUrl":
-            urls.append(cut(e))
-        elif name == "MessageEntityTextUrl":
-            label = cut(e)
+            if bare:
+                urls.append(cut(e))
+            continue
+        if name == "MessageEntityTextUrl":
+            # Hidden behind a label: this one the text does not show, so it is the
+            # only new information here. The label is worth carrying only if a
+            # person could see it — zero-width joiners used as an anchor are how
+            # channels attach a preview, and they read as `()` after escaping.
+            label = cut(e).strip("\u200b\u200c\u200d\ufeff \t\n")
             urls.append(f"{e.url} ({label})" if label else e.url)
     seen, out = set(), []
     for u in urls:
@@ -381,14 +399,29 @@ def _links(msg) -> list[str] | None:
     return out or None
 
 
-def _web_preview(msg) -> dict | None:
-    """The link preview card — what Telegram shows under the message."""
+def _web_preview(msg, elsewhere: list[str] | None = None) -> dict | None:
+    """The link preview card — what Telegram shows under the message.
+
+    The card is generated from a link in the message, so its url is nearly always
+    one the reader already has, either written out in the text or listed in
+    `links`. Repeating it is expensive out of proportion to its length: preview
+    urls are the long machine-generated kind. What the card actually adds is the
+    title, the site and the description — read off the page, and nowhere else in
+    the message.
+
+    `elsewhere` is what the reader is being given besides this card. Passing it
+    drops the url as a duplicate; passing nothing keeps it, which is right where
+    the text is truncated and the card is all there is.
+    """
     page = getattr(msg, "web_preview", None)
     if page is None or not getattr(page, "url", None):
         return None
     desc = getattr(page, "description", None)
+    seen = elsewhere is not None and (
+        page.url in (msg.message or "") or any(page.url in u for u in elsewhere)
+    )
     row = {
-        "url": page.url,
+        "url": None if seen else page.url,
         "site": getattr(page, "site_name", None),
         "title": getattr(page, "title", None),
         "description": (desc[:300] if desc else None),
@@ -702,8 +735,10 @@ class TelegramService:
         if msg.fwd_from:
             out["forwarded"] = True
         out["reactions"] = _reactions(msg)
+        # The full text goes out with the message, so a url written in plain sight
+        # does not need a second row of its own.
         out["links"] = _links(msg)
-        out["preview"] = _web_preview(msg)
+        out["preview"] = _web_preview(msg, out["links"] or [])
         if not out["text"] and out["media"]:
             out["text"] = f"[{out['media']}]"
         return {k: v for k, v in out.items() if v not in (None, False, "")} | {"id": msg.id}
@@ -1636,7 +1671,9 @@ class TelegramService:
                 "caption": (m.message or "")[:200] or None,
             }
             if kind == "link":
-                row["urls"] = _links(m)
+                # Here the links are what was asked for, and the caption is cut at
+                # 200 characters, so nothing is a duplicate of anything.
+                row["urls"] = _links(m, bare=True)
                 row["preview"] = _web_preview(m)
             total_bytes += row["size"] or 0
             rows.append({k: v for k, v in row.items() if v is not None})

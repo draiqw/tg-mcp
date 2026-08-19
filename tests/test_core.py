@@ -8,6 +8,7 @@ file.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from conftest import (
@@ -37,7 +38,7 @@ def test_links_are_cut_by_utf16_offsets():
         message="Here 🎉 https://example.com/a and a tail",
         entities=[make_entity("MessageEntityUrl", offset=8, length=21)],
     )
-    assert core._links(msg) == ["https://example.com/a"]
+    assert core._links(msg, bare=True) == ["https://example.com/a"]
 
 
 def test_a_link_behind_a_label_is_returned_together_with_the_label():
@@ -60,7 +61,73 @@ def test_repeated_links_collapse_keeping_the_order():
             make_entity("MessageEntityUrl", 28, 13),
         ],
     )
-    assert core._links(msg) == ["https://a.tld", "https://b.tld"]
+    assert core._links(msg, bare=True) == ["https://a.tld", "https://b.tld"]
+
+
+def test_a_url_in_plain_sight_is_not_listed_a_second_time():
+    """The reader gets the full text, and the url is written in it.
+
+    Listing it again is the same characters twice. On a channel that posts links
+    that duplication was a quarter of the answer, and every token of it is paid
+    for by whoever asked what is new.
+    """
+    msg = FakeMessage(
+        message="read https://example.com/a",
+        entities=[make_entity("MessageEntityUrl", 5, 21)],
+    )
+    assert core._links(msg) is None
+    assert core._links(msg, bare=True) == ["https://example.com/a"]
+
+
+def test_a_hidden_link_is_listed_whatever_the_mode():
+    """This one the text does not show, so it is the only new thing in the message."""
+    msg = FakeMessage(
+        message="the contract",
+        entities=[make_entity("MessageEntityTextUrl", 4, 8,
+                              url="https://example.com/contract")],
+    )
+    assert core._links(msg) == ["https://example.com/contract (contract)"]
+    assert core._links(msg, bare=True) == ["https://example.com/contract (contract)"]
+
+
+def test_an_invisible_label_is_not_carried():
+    """Channels anchor a preview to zero-width characters; those read as `()`.
+
+    Escaped into JSON a zero-width joiner costs six characters and shows nothing,
+    which is the worst ratio in the whole answer.
+    """
+    msg = FakeMessage(
+        message="\u200b\u200b text",
+        entities=[make_entity("MessageEntityTextUrl", 0, 2,
+                              url="https://example.com/photo")],
+    )
+    assert core._links(msg) == ["https://example.com/photo"]
+
+
+def test_the_preview_does_not_repeat_a_url_the_reader_already_has():
+    """The card is made from a link in the message — its url is rarely news.
+
+    What the card does add is what was read off the page: the title, the site,
+    the description. Preview urls are the long machine-generated kind, so this is
+    the cheapest field to drop and the most expensive to keep.
+    """
+    page = SimpleNamespace(
+        url="https://example.com/a", site_name="Example",
+        title="A", description="about a", type="article",
+    )
+    msg = FakeMessage(message="read https://example.com/a", web_preview=page)
+    assert core._web_preview(msg, []) == {
+        "site": "Example", "title": "A", "description": "about a", "type": "article",
+    }
+    # Nothing passed means nothing is known to be a duplicate — the caller is
+    # showing a cut-down text, and then the card is all there is.
+    assert core._web_preview(msg)["url"] == "https://example.com/a"
+
+
+def test_the_preview_keeps_a_url_that_is_nowhere_else():
+    page = SimpleNamespace(url="https://example.com/hidden", title="H")
+    msg = FakeMessage(message="see the file", web_preview=page)
+    assert core._web_preview(msg, [])["url"] == "https://example.com/hidden"
 
 
 def test_a_message_without_links():
@@ -140,7 +207,9 @@ def test_parsing_an_incoming_message(service, user):
     row = service.message_dict(msg, chat_name=user.first_name)
     assert row == {
         "id": 7,
-        "date": "2026-08-17T09:30:00+00:00",
+        # `Z`, not `+00:00`: the same instant, five characters shorter, and every
+        # answer about a chat carries one of these per message.
+        "date": "2026-08-17T09:30:00Z",
         "text": "hi",
         "from_id": 555,
         "from": user.first_name,
@@ -378,7 +447,7 @@ def test_the_dialog_row(service, user):
     assert row["id"] == 555 and row["type"] == "user" and row["unread"] == 2
     assert row["link"] == "https://t.me/petya"
     assert row["last_text"] == "hi"
-    assert row["last"] == "2026-08-17T09:00:00+00:00"
+    assert row["last"] == "2026-08-17T09:00:00Z"
 
 
 def test_the_link_to_a_dm(user):

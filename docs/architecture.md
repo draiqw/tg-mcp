@@ -24,9 +24,9 @@ the code talks to Telegram. Everything else is transport and scaffolding:
 
 | File | Lines | Role |
 |---|---|---|
-| **`tgagent/core.py`** | 5182 | **core: all account operations, chat resolution, limits** |
+| **`tgagent/core.py`** | 5219 | **core: all account operations, chat resolution, limits** |
 | `tgagent/daemon.py` | 2047 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
-| `tgagent/mcp_server.py` | 1575 | 79 tools, each one a single call to the daemon |
+| `tgagent/mcp_server.py` | 1632 | 79 tools, each one a single call to the daemon |
 | `tgagent/index.py` | 670 | local index of the correspondence: sqlite + FTS5, Russian morphology |
 | `tgagent/memory.py` | 234 | chat dossiers: file format, prompt, language-model call |
 | `tgagent/cli.py` | 712 | setup, sign-in, daemon control |
@@ -200,6 +200,50 @@ survives a restart. A reminder with `unless_reply` is cancelled in `feed_waiters
 in the same place where those waiting on `tg_wait` are woken: it is one and the same
 incoming stream, and there is no point in listening to it a second time.
 
+## What the answer costs
+
+The agent pays for every token of every answer, and the account is not a small
+data source: forty messages of a busy chat is a real payload. So the size of what
+crosses the socket is a design property here, not a detail — and the way to find
+out is to measure it rather than to reason about it. Four things came out of doing
+that, none of which changed what a single tool does:
+
+- **The answer was travelling twice.** Every tool is annotated `-> str`, which
+  FastMCP reads as "the result is structured": it sends the string as text and
+  again as `{"result": ...}`, and puts an output schema per tool in the listing.
+  For a typed return value that second copy is the useful one; for a JSON string
+  in a box it is the same bytes again. `mcp_server.tool` — the local wrapper every
+  tool is registered through — turns it off.
+- **The answer was indented.** `json.dumps(..., indent=2)` costs about a quarter
+  of a long answer in leading spaces, and the reader is a model, not a person. `tg
+  call` and the CLI format their own copy for whoever is looking at a terminal.
+- **The argument schemas were written for a form generator.** Pydantic emits a
+  `title` for every property — "Chat", next to a property called `chat` — and
+  spells an optional argument as `anyOf: [X, null]` plus `default: null`, four
+  times the width of `{"type": "X"}`. `compact_schema` strips both after
+  registration. Validation is unaffected: it runs against the function's own
+  model, so an explicit null still goes through, and an argument where null
+  *means* something (`tg_dialogs(archived=None)` — both lists) keeps its union.
+- **Urls were being repeated.** The link preview card is generated from a link in
+  the message, so its url is nearly always one the reader already has; a bare url
+  in `links` is by construction a substring of the text alongside it. Both are
+  dropped where the full text goes out, and both are kept where it does not —
+  `tg_media(kind="link")` truncates the caption, and there the links are the
+  answer. What the card genuinely adds — title, site, description, read off the
+  page — always stays.
+
+Together that is a little under two thirds off a fixed walk of ten reading calls,
+and about a third off the tool listing. `tests/test_mcp_payload.py` holds each of
+them, because every one of these was invisible while it was happening: nothing
+failed, nothing looked wrong, and the bill was the only symptom.
+
+The two costs behave differently and are worth separating. The listing is paid on
+every request while the tools are loaded, and it is fixed: roughly half of what is
+left is the tool descriptions, which are what make the agent pick the right tool
+and are not worth trimming by weight. The answers are paid per call and scale with
+what was asked for — `limit` is the honest lever there, and most of what remains
+in a large answer is message text, which is the thing that was wanted.
+
 ## Invariants that must not be broken
 
 1. **One writer of the session.** Never open `data/session.session` from a second
@@ -302,6 +346,12 @@ to be imported.
 
 The script stays a static analysis: it reads the sources through `ast` instead of
 importing them, so it does not pull in Telethon and works without a running daemon.
+
+`tokens.py` counts what the MCP server puts on the wire: the tool listing, and a
+fixed walk of ten reading calls as the client receives them. It needs a running
+daemon and reads only. The figures come out of the account it runs on, so they do
+not compare between machines — the same machine before and after a change does,
+which is the only thing it is for. See [what the answer costs](#what-the-answer-costs).
 
 `smoke.py` pulls all the reading methods through the daemon on a live account,
 including `view` (a real picture) and `transcribe` (a real voice message found in the
