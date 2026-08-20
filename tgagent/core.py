@@ -12,6 +12,7 @@ import json
 import re
 import time
 from collections import deque
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -164,6 +165,20 @@ INDEX_BUDGET_SEC = 100.0
 INDEX_DEFAULT_LIMIT = 2000
 INDEX_MAX_LIMIT = 20000
 INDEX_BATCH = 300
+# Whether an answer carries a message's trimmings: reactions, the link card, the
+# list of hidden urls, the minute an edit happened. Off is the default, because a
+# tool that quietly returns less than it says it does is worse than an expensive
+# one — this is turned on by the caller, per call.
+#
+# A ContextVar and not an attribute of the service: one service object serves
+# every client at once, and a flag on `self` would leak out of one call into
+# another that happened to overlap it. Set at the daemon's dispatch boundary
+# rather than threaded through the eighteen places that build a message, for the
+# same reason `account` is handled there — it describes the answer, not the
+# request to Telegram.
+BRIEF: ContextVar[bool] = ContextVar("brief", default=False)
+
+
 # Words that mean "the owner" when they appear as an author filter. Matching is
 # language-blind on purpose: the person types these, they do not read them, and
 # TG_LANG says nothing about the keyboard layout in front of them.
@@ -734,11 +749,18 @@ class TelegramService:
             out["chat"] = chat_name
         if msg.fwd_from:
             out["forwarded"] = True
-        out["reactions"] = _reactions(msg)
-        # The full text goes out with the message, so a url written in plain sight
-        # does not need a second row of its own.
-        out["links"] = _links(msg)
-        out["preview"] = _web_preview(msg, out["links"] or [])
+        if BRIEF.get():
+            # What a message is — who, when, what was said — without what surrounds
+            # it. The trimmings are worth their tokens when a chat is being read
+            # and not when it is being triaged, and only the caller knows which of
+            # the two this is. `edited` keeps the fact and loses the minute.
+            out["edited"] = bool(msg.edit_date) or None
+        else:
+            out["reactions"] = _reactions(msg)
+            # The full text goes out with the message, so a url written in plain
+            # sight does not need a second row of its own.
+            out["links"] = _links(msg)
+            out["preview"] = _web_preview(msg, out["links"] or [])
         if not out["text"] and out["media"]:
             out["text"] = f"[{out['media']}]"
         return {k: v for k, v in out.items() if v not in (None, False, "")} | {"id": msg.id}

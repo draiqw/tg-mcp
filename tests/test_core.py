@@ -218,6 +218,53 @@ def test_parsing_an_incoming_message(service, user):
     }
 
 
+def test_brief_keeps_the_message_and_drops_what_surrounds_it(service, user):
+    """`brief` is the caller saying "I am triaging, not reading".
+
+    What a message is — who, when, what was said — survives. Reactions, the link
+    card and the exact minute of an edit do not: they are worth their tokens
+    while a chat is being read closely and not while forty of them are being
+    scanned for what matters.
+    """
+    page = SimpleNamespace(url="https://example.com/a", title="A")
+    msg = FakeMessage(
+        id=7, message="see https://example.com/a", sender=user, out=False,
+        date=datetime(2026, 8, 17, 9, 30, tzinfo=UTC),
+        edit_date=datetime(2026, 8, 17, 9, 40, tzinfo=UTC),
+        web_preview=page,
+        entities=[make_entity("MessageEntityTextUrl", 4, 3, url="https://other.tld")],
+    )
+    full = service.message_dict(msg, chat_name="Chat")
+    assert {"links", "preview"} <= set(full)
+    assert full["edited"] == "2026-08-17T09:40:00Z"
+
+    token = core.BRIEF.set(True)
+    try:
+        lean = service.message_dict(msg, chat_name="Chat")
+    finally:
+        core.BRIEF.reset(token)
+
+    assert "links" not in lean and "preview" not in lean and "reactions" not in lean
+    # The fact of the edit stays; the minute goes. "This was edited" is what gets
+    # read, "at 09:40" almost never is.
+    assert lean["edited"] is True
+    for key in ("id", "date", "text", "from", "from_id", "chat"):
+        assert lean[key] == full[key]
+
+
+def test_brief_does_not_leak_out_of_the_call_that_asked_for_it(service):
+    """One service object serves every client at once.
+
+    A flag on `self` would turn a concurrent reader's answer brief without
+    anybody asking, which is the kind of bug that shows up as "sometimes the
+    reactions are missing".
+    """
+    assert core.BRIEF.get() is False
+    token = core.BRIEF.set(True)
+    core.BRIEF.reset(token)
+    assert core.BRIEF.get() is False
+
+
 def test_empty_fields_are_thrown_out_but_the_id_stays(service):
     """The id is always required: without it the message cannot be opened, nor replied to."""
     row = service.message_dict(FakeMessage(id=0, date=None))

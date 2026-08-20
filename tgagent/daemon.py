@@ -27,7 +27,7 @@ from telethon.tl import types
 
 from . import alerts, config
 from . import capabilities as caps
-from .core import SAVED_ALIASES, GuardError, TelegramService, entity_name
+from .core import BRIEF, SAVED_ALIASES, GuardError, TelegramService, entity_name
 from .core import _parse_since as parse_since
 from .core import _parse_when as parse_when
 from .core import reaction_of as core_reaction_of
@@ -1834,6 +1834,10 @@ class Daemon:
         # back. It is always popped out of params, otherwise it would travel into a
         # core method as an extra keyword argument.
         account = params.pop("account", None) or payload.get("account")
+        # `brief` describes the shape of the answer, not the request to Telegram,
+        # so it is popped here beside `account` and never reaches a core method —
+        # eighteen places build a message and none of them should have to know.
+        brief = bool(params.pop("brief", False))
         try:
             svc = self.service(account)
         except (ValueError, RuntimeError) as exc:
@@ -1844,6 +1848,7 @@ class Daemon:
                 {"ok": False, "error": f"the daemon does not know the method {method!r}"},
                 status=404,
             )
+        token = BRIEF.set(brief)
         try:
             if method in WRITE_METHODS:
                 # We ask before the call, not inside the core: a refusal must stay an
@@ -1876,6 +1881,10 @@ class Daemon:
             error = caps.explain_error(exc) or f"{type(exc).__name__}: {exc}"
             self.append_action(method, params, error, svc.account)
             return web.json_response({"ok": False, "error": error}, status=500)
+        finally:
+            # The task ends with the request, but the reset keeps the flag from
+            # outliving it if the loop ever reuses the context.
+            BRIEF.reset(token)
 
     async def run(self) -> None:
         config.ensure_dirs()

@@ -379,3 +379,31 @@ async def test_the_action_log_holds_the_same_cause_as_the_agent_got(daemon, monk
 
     await call_daemon(daemon, monkeypatch, ChatAdminRequiredError(request=None))
     assert "administrator rights" in config.ACTIONS_LOG.read_text()
+
+
+async def test_brief_never_reaches_a_core_method(daemon, monkeypatch):
+    """It describes the answer, not the request, so it is popped at the boundary.
+
+    Eighteen places in the core build a message and none of them takes a `brief`
+    argument; if it travelled on in `params` every one of those calls would fail
+    on an unexpected keyword.
+    """
+    seen: dict = {}
+
+    async def spy(**params: Any) -> dict:
+        seen.update(params)
+        seen["flag_inside"] = core.BRIEF.get()
+        return {"ok": 1}
+
+    class Svc:
+        account = "main"
+
+    monkeypatch.setattr(daemon, "service", lambda account=None: Svc())
+    monkeypatch.setattr(daemon, "dispatch_table", lambda svc: {"history": spy})
+    resp = await daemon.handle_call(
+        FakeRequest({"method": "history", "params": {"chat": "Work", "brief": True}})
+    )
+    assert json.loads(resp.text)["ok"] is True
+    assert seen == {"chat": "Work", "flag_inside": True}
+    # And it does not outlive the request that asked for it.
+    assert core.BRIEF.get() is False

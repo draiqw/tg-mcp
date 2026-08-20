@@ -24,9 +24,9 @@ the code talks to Telegram. Everything else is transport and scaffolding:
 
 | File | Lines | Role |
 |---|---|---|
-| **`tgagent/core.py`** | 5219 | **core: all account operations, chat resolution, limits** |
-| `tgagent/daemon.py` | 2047 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
-| `tgagent/mcp_server.py` | 1632 | 79 tools, each one a single call to the daemon |
+| **`tgagent/core.py`** | 5241 | **core: all account operations, chat resolution, limits** |
+| `tgagent/daemon.py` | 2056 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
+| `tgagent/mcp_server.py` | 1623 | 79 tools, each one a single call to the daemon |
 | `tgagent/index.py` | 670 | local index of the correspondence: sqlite + FTS5, Russian morphology |
 | `tgagent/memory.py` | 234 | chat dossiers: file format, prompt, language-model call |
 | `tgagent/cli.py` | 712 | setup, sign-in, daemon control |
@@ -237,12 +237,30 @@ and about a third off the tool listing. `tests/test_mcp_payload.py` holds each o
 them, because every one of these was invisible while it was happening: nothing
 failed, nothing looked wrong, and the bill was the only symptom.
 
+Past that point the savings stop being free, and what is left is offered rather
+than taken. `brief=true` — on `tg_history`, `tg_history_batch`, `tg_unread`,
+`tg_search`, `tg_mentions` and `tg_person` — drops reactions, the link card and
+the minute of an edit, keeping who wrote what and when: measured, a fifth to two
+fifths off an answer about many chats, and almost nothing off one long
+conversation, which is text and should be. It is off by default on purpose: a
+tool that quietly returns less than it says it does is worse than an expensive
+one, and only the caller knows whether this is triage or reading.
+
+The flag is set at the daemon's dispatch boundary, beside `account`, and read
+through a `ContextVar`. Not an attribute of the service, because one service
+object serves every client at once and a flag on `self` would turn a concurrent
+reader's answer brief without anybody asking; not a parameter threaded through
+the core, because eighteen places build a message and none of them should have to
+know what the answer is being used for.
+
 The two costs behave differently and are worth separating. The listing is paid on
-every request while the tools are loaded, and it is fixed: roughly half of what is
-left is the tool descriptions, which are what make the agent pick the right tool
-and are not worth trimming by weight. The answers are paid per call and scale with
-what was asked for — `limit` is the honest lever there, and most of what remains
-in a large answer is message text, which is the thing that was wanted.
+every request while the tools are loaded, and it is stable — measure it before and
+after a change and the difference is real. Roughly two thirds of what is left is
+the tool descriptions, which are what make the agent pick the right tool; the five
+longest were rewritten tighter without losing a fact, and going further would be
+trading correct tool choice for tokens. The answers are paid per call and scale
+with what was asked for: `limit` and `brief` are the levers, and most of what
+remains in a large answer is message text, which is the thing that was wanted.
 
 ## Invariants that must not be broken
 

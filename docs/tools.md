@@ -263,7 +263,25 @@ we will not try" is the worst refusal of all.
 
 ## Reading
 
-### `tg_unread(limit_chats=20, per_chat=5, archived=None)`
+### `brief`
+
+Six tools take it: `tg_unread`, `tg_history`, `tg_history_batch`, `tg_search`,
+`tg_mentions`, `tg_person`. It drops what surrounds a message — reactions, the
+link preview card, the exact minute of an edit — and keeps what a message is:
+who, when, what was said, what was attached, what it replies to.
+
+It exists because the agent pays by the token for every answer, and the same
+call means two different things. Scanning forty chats for what matters, the
+trimmings are pure cost; reading one conversation closely, they are the point.
+Measured on a real account: about a fifth off `tg_search`, a quarter off
+`tg_unread`, and under a tenth off a long `tg_history` — which is text, and text
+is what was asked for.
+
+Off by default deliberately. A tool that quietly returns less than it promises
+is worse than an expensive one, and only the caller knows which of the two jobs
+this is. See [what the answer costs](architecture.md#what-the-answer-costs).
+
+### `tg_unread(limit_chats=20, per_chat=5, archived=None, brief=False)`
 Everything unread, grouped by chat, with the latest incoming messages. Every
 chat is marked as archived or not. By default it looks at **both** folders.
 
@@ -300,7 +318,7 @@ On a live account: 147 chats with the debt on you, 115 with the debt on the
 other side, the oldest one hanging for 39,455 hours (since February 2022). Out
 of 323 dialogs, 48 channels, 12 bots and Saved Messages were filtered out.
 
-### `tg_history(chat, limit=40, before_id=None, from_user=None, search=None, topic=None, saved_from=None)`
+### `tg_history(chat, limit=40, before_id=None, from_user=None, search=None, topic=None, saved_from=None, brief=False)`
 One chat's conversation, oldest to newest. `before_id` pages deeper, `topic`
 reads a single forum thread (the id comes from `tg_topics`).
 
@@ -316,12 +334,12 @@ this author in total, not only on this page. The message identifiers in the
 answer are ordinary Saved Messages ids; they can be passed to `tg_message`,
 `tg_view` and `tg_forward`.
 
-### `tg_history_batch(chats, limit=20, search=None)`
+### `tg_history_batch(chats, limit=20, search=None, brief=False)`
 Up to 25 chats in one call. An error in one chat does not bring down the rest —
 it comes back in that chat's row. This is the right way to read several chats; a
 loop over `tg_history` makes 25 trips where one is enough.
 
-### `tg_search(query="", chat=None, limit=30, kind=None, since=None, until=None, tag=None, engine="server", author=None)`
+### `tg_search(query="", chat=None, limit=30, kind=None, since=None, until=None, tag=None, engine="server", author=None, brief=False)`
 Search across the whole correspondence; with `chat`, inside one chat.
 
 `engine` chooses where to search. `server` (the default) is the ordinary
@@ -411,7 +429,7 @@ Saved Messages labels and how many messages sit under each. The name from there
 goes into `tg_search(chat="me", tag=...)`. A label with no name is looked up by
 its emoji or by the id of the custom emoji — Telegram allows those too.
 
-### `tg_mentions(limit=20, kind="mentions")`
+### `tg_mentions(limit=20, kind="mentions", brief=False)`
 Unread mentions and replies to you in groups and channels.
 
 ### `tg_events(limit=50, since=None)`
@@ -841,7 +859,7 @@ Contacts and slices of them:
 The groups and channels you are both in. A quick way to identify an unfamiliar
 person: where they came from and through whom.
 
-### `tg_person(user, messages=20, chats=10)`
+### `tg_person(user, messages=20, chats=10, brief=False)`
 A dossier on a person in one call — what `tg_chat_info`, `tg_contacts`,
 `tg_common_chats`, `tg_history` and `tg_resolve` used to be pulled one after
 another for. The point is context: before writing to someone, the agent should
