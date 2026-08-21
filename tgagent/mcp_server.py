@@ -207,7 +207,11 @@ async def tg_dialogs(
     query: str | None = None,
     kind: str | None = None,
 ) -> str:
-    """List chats (most recent first) with unread counts and links.
+    """List chats, most recent first, with unread counts.
+
+    A chat row leaves out what the default already says: no `pinned` means not
+    pinned, no `unread` means nothing unread, no `username` means the chat has
+    none. The link is https://t.me/ plus the username.
 
     Args:
         limit: how many chats to return.
@@ -223,8 +227,8 @@ async def tg_dialogs(
               everything you forwarded there by its original author. Read one of
               them with tg_history(chat="me", saved_from=<that author>).
     """
-    return j(await call("dialogs", limit=limit, unread_only=unread_only,
-                        archived=archived, query=query, kind=kind))
+    return j(lean_dialogs(await call("dialogs", limit=limit, unread_only=unread_only,
+                                     archived=archived, query=query, kind=kind)))
 
 
 @tool()
@@ -252,7 +256,7 @@ async def tg_folders() -> str:
 
 @tool()
 async def tg_unread(
-    limit_chats: int = 20, per_chat: int = 5, archived: bool | None = None,
+    limit_chats: int = 20, per_chat: int = 3, archived: bool | None = None,
     brief: bool = False,
 ) -> str:
     """Everything unread, grouped by chat, with the latest incoming messages.
@@ -262,7 +266,8 @@ async def tg_unread(
 
     Args:
         limit_chats: how many chats to include.
-        per_chat: how many recent incoming messages per chat.
+        per_chat: how many recent incoming messages per chat. Three is enough
+                  to tell what a chat wants; open the chat if it is not.
         archived: null (default) covers both the main list and the archive,
                   false limits it to the main list, true to the archive.
         brief: drop reactions, link cards and edit times. Same messages, about a
@@ -310,7 +315,7 @@ async def tg_pending(
 @tool()
 async def tg_history(
     chat: str,
-    limit: int = 40,
+    limit: int = 20,
     before_id: int | None = None,
     from_user: str | None = None,
     search: str | None = None,
@@ -322,7 +327,8 @@ async def tg_history(
 
     Args:
         chat: chat id, @username, t.me link, exact title, or "me" for Saved Messages.
-        limit: number of messages.
+        limit: number of messages. Twenty is a conversation; raise it when
+               reading a chat properly, not to be safe.
         before_id: paginate to messages older than this message id.
         from_user: only messages from this person.
         search: only messages containing this text.
@@ -1578,6 +1584,40 @@ async def tg_remind(
     """
     return j(await call("remind", text=text, when=when, chat=chat,
                         unless_reply=unless_reply, list=list, cancel=cancel))
+
+
+# What a chat row may leave unsaid, and what it would have said. A list of chats
+# is the widest table the agent reads and the emptiest: thirty rows of twelve
+# keys, most of them false, none, zero or an empty string. Measured on this
+# account the key names alone were 37% of the answer, and dropping the ones that
+# only restate the default took the whole call down by a quarter.
+#
+# This is not a smaller answer, it is the same answer without the part that
+# carries nothing: a chat that does not say it is pinned is not pinned. It is
+# done here rather than in `dialog_row`, because the daemon reads those same
+# rows by key — the digest counts `unread`, the unread walk reads `archived` —
+# and a row with holes in it is only fit to be read by someone who was told
+# where the holes are.
+DIALOG_DEFAULTS = {
+    "unread": 0, "mentions": 0, "pinned": False, "archived": False,
+    "username": None, "members": None, "last_text": "",
+}
+
+
+def lean_dialogs(rows: Any) -> Any:
+    """Drop what the reader can supply: the defaults above, and the link.
+
+    `link` is https://t.me/ plus the username standing in the same row — a field
+    computed from its neighbour, paid for on every row that has one.
+    """
+    if not isinstance(rows, list):
+        return rows
+    return [
+        {k: v for k, v in row.items()
+         if k != "link" and (k not in DIALOG_DEFAULTS or v != DIALOG_DEFAULTS[k])}
+        if isinstance(row, dict) else row
+        for row in rows
+    ]
 
 
 def compact_schema(node: Any) -> Any:

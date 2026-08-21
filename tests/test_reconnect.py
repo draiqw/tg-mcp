@@ -176,3 +176,47 @@ async def test_the_health_loop_speaks_once_per_outage_not_once_per_tick(
     task.cancel()
     assert len(said) == 2
     assert said[1] != said[0]                # and the recovery is announced
+
+
+# ---------------------------------------------------------------- the log itself
+
+
+def test_the_log_is_trimmed_in_place_and_keeps_the_tail(tmp_path, monkeypatch):
+    """It had reached 82 MB before anybody looked, which is a log nobody opens.
+
+    Trimming in place rather than renaming is not a detail: the daemon's stdout
+    is this file, opened by whoever started it. A rename would leave the process
+    writing into the renamed inode and the visible file empty for the rest of the
+    run — rotated to look at, dead to read.
+    """
+    path = tmp_path / "daemon.log"
+    monkeypatch.setattr(daemon_mod.config, "DAEMON_LOG", path)
+    monkeypatch.setattr(daemon_mod, "MAX_DAEMON_LOG_BYTES", 4096)
+    monkeypatch.setattr(daemon_mod, "DAEMON_LOG_KEEP_BYTES", 1024)
+
+    path.write_bytes(b"old\n" * 100 + b"x" * 8000 + b"the end\n")
+    daemon_mod.trim_daemon_log()
+
+    kept = path.read_bytes()
+    assert len(kept) <= 1024 + 200          # the tail, plus the line it writes
+    assert kept.rstrip().endswith(b"4 MB") or b"the end" in kept
+
+    # And the file is still a file that can be appended to.
+    with path.open("a") as fh:
+        fh.write("after\n")
+    assert path.read_text().endswith("after\n")
+
+
+def test_a_log_under_the_cap_is_left_alone(tmp_path, monkeypatch):
+    path = tmp_path / "daemon.log"
+    monkeypatch.setattr(daemon_mod.config, "DAEMON_LOG", path)
+    monkeypatch.setattr(daemon_mod, "MAX_DAEMON_LOG_BYTES", 4096)
+    path.write_text("small\n")
+    daemon_mod.trim_daemon_log()
+    assert path.read_text() == "small\n"
+
+
+def test_a_log_that_cannot_be_trimmed_does_not_stop_the_daemon(tmp_path, monkeypatch):
+    """Nothing about a log is worth killing the process over."""
+    monkeypatch.setattr(daemon_mod.config, "DAEMON_LOG", tmp_path / "gone.log")
+    daemon_mod.trim_daemon_log()            # missing file: no exception

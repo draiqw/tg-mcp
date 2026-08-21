@@ -113,3 +113,46 @@ def test_compact_schema_leaves_alone_what_it_does_not_understand():
     three = {"anyOf": [{"type": "string"}, {"type": "integer"}, {"type": "null"}],
              "default": None}
     assert mcp_server.compact_schema(three)["anyOf"] == three["anyOf"]
+
+
+# ------------------------------------------------------------------ chat rows
+
+
+def test_a_chat_row_does_not_repeat_the_default():
+    """Thirty rows of twelve keys, and most of the twelve say nothing.
+
+    `"pinned":false` costs as much as `"pinned":true` and carries less: the
+    reader already knew. Measured on a real account, dropping the keys that only
+    restate the default took a list of thirty chats down by a quarter.
+    """
+    rows = [
+        {"id": 1, "name": "Group", "type": "group", "unread": 0, "mentions": 0,
+         "pinned": False, "archived": False, "username": None,
+         "link": None, "members": None, "last": "2026-08-19T08:49:36Z",
+         "last_text": ""},
+        {"id": 2, "name": "Pete", "type": "user", "unread": 3, "mentions": 1,
+         "pinned": True, "archived": True, "username": "pete",
+         "link": "https://t.me/pete", "members": 2, "last": "2026-08-19T09:00:00Z",
+         "last_text": "hi"},
+    ]
+    quiet, loud = mcp_server.lean_dialogs(rows)
+    assert quiet == {"id": 1, "name": "Group", "type": "group",
+                     "last": "2026-08-19T08:49:36Z"}
+    # Nothing that carries information is touched.
+    assert loud == {"id": 2, "name": "Pete", "type": "user", "unread": 3,
+                    "mentions": 1, "pinned": True, "archived": True,
+                    "username": "pete", "members": 2,
+                    "last": "2026-08-19T09:00:00Z", "last_text": "hi"}
+
+
+def test_the_link_goes_even_when_it_is_there():
+    """It is https://t.me/ plus the username standing in the same row."""
+    row, = mcp_server.lean_dialogs([{"id": 1, "name": "P", "username": "pete",
+                                     "link": "https://t.me/pete"}])
+    assert "link" not in row and row["username"] == "pete"
+
+
+def test_a_row_that_is_not_a_row_is_left_alone():
+    """kind="saved" and future shapes go through the same tool."""
+    assert mcp_server.lean_dialogs("not a list") == "not a list"
+    assert mcp_server.lean_dialogs([1, "x"]) == [1, "x"]

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import logging
 import os
 import signal
 import sys
@@ -34,6 +35,12 @@ from .core import reaction_of as core_reaction_of
 from .i18n import t
 
 MAX_EVENT_LOG_BYTES = 20 * 1024 * 1024
+# The daemon's own log. It had grown to 82 MB and 1.2 million lines before
+# anybody looked, and most of that was Telethon repeating one line about a
+# connection it had already given up on. A log nobody can open is a log nobody
+# reads, and this one is the only place a silent failure leaves a trace.
+MAX_DAEMON_LOG_BYTES = 20 * 1024 * 1024
+DAEMON_LOG_KEEP_BYTES = 4 * 1024 * 1024
 REMINDER_TICK_SEC = 30
 DIGEST_TICK_SEC = 30
 # A dossier is refreshed less often: it is a call to a language model, not a
@@ -62,6 +69,35 @@ AUTO_CHAT_LEVEL = {"archive", "mute", "folder"}
 def log(msg: str) -> None:
     line = f"{datetime.now().isoformat(timespec='seconds')} {msg}"
     print(line, flush=True)
+
+
+def trim_daemon_log() -> None:
+    """Keep the log bounded, in place, without moving the file being written to.
+
+    The daemon's stdout *is* this file, opened by whoever started the daemon.
+    Renaming it the way the event log is rotated would leave the process writing
+    into the renamed inode and the new file empty for the rest of the run — the
+    log would look rotated and be dead. Truncating in place is safe instead: the
+    handle is in append mode, so every write lands at the end of whatever the
+    file is at that moment.
+
+    The tail is what is kept, because the useful part of a log is the part
+    nearest to the failure. A line written between the read and the truncate is
+    lost; that is a log, and the alternative is a file nobody can open.
+    """
+    try:
+        path = config.DAEMON_LOG
+        if not path.exists() or path.stat().st_size <= MAX_DAEMON_LOG_BYTES:
+            return
+        with path.open("r+b") as fh:
+            fh.seek(-DAEMON_LOG_KEEP_BYTES, os.SEEK_END)
+            tail = fh.read()
+            fh.seek(0)
+            fh.write(tail)
+            fh.truncate()
+        log(f"log: trimmed to the last {DAEMON_LOG_KEEP_BYTES // (1024 * 1024)} MB")
+    except Exception as exc:  # a log that cannot be trimmed must not stop the daemon
+        log(f"log: could not trim: {exc}")
 
 
 class Daemon:
@@ -1029,6 +1065,7 @@ class Daemon:
         """
         while True:
             await asyncio.sleep(HEALTH_TICK_SEC)
+            trim_daemon_log()
             for label, svc in list(self.services.items()):
                 try:
                     if await svc.ensure_connected():
@@ -2095,6 +2132,18 @@ CONFIRM_YES = {"allow", "yes", "y", "ok", "okay", "+", "go", "go ahead", "do it"
 
 
 def main() -> None:
+    # Telethon logs through the standard library, and with nobody configuring it
+    # that goes to logging.lastResort, which prints the bare message. That is how
+    # 1.2 million lines ended up in the log with no time on any of them: the one
+    # outage worth dating could only be dated by the neighbouring line from the
+    # bot loop. WARNING keeps the volume exactly where it was; only the shape
+    # changes.
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(asctime)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+        stream=sys.stdout,
+    )
     try:
         asyncio.run(Daemon().run())
     except KeyboardInterrupt:

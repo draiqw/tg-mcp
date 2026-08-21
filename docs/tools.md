@@ -100,7 +100,15 @@ Telegram folders in detail: what is pinned inside a folder, explicitly included
 chats, exclusions, auto-rules (all contacts, all groups, hide read), `total`.
 
 ### `tg_dialogs(limit=30, unread_only=False, archived=False, query=None, kind=None)`
-A list of chats, freshest first, with unread counts and links.
+A list of chats, freshest first, with unread counts.
+
+A row says only what is not already implied: no `pinned` means not pinned, no
+`unread` means nothing unread, no `mentions` means none, no `username` means the
+chat has none, no `archived` means it is in the main list. There is no `link`
+field — a chat's link is `https://t.me/` plus its username. Thirty rows of
+twelve keys were a third key names and mostly `false`; this is the same answer
+with that part left out.
+
 `archived`: `false` — the main list, `true` — the archive, `null` — both folders.
 `kind`: `user` / `bot` / `group` / `channel`. `kind="group"` is the answer to
 "which groups am I in". `query` filters by title.
@@ -281,7 +289,7 @@ Off by default deliberately. A tool that quietly returns less than it promises
 is worse than an expensive one, and only the caller knows which of the two jobs
 this is. See [what the answer costs](architecture.md#what-the-answer-costs).
 
-### `tg_unread(limit_chats=20, per_chat=5, archived=None, brief=False)`
+### `tg_unread(limit_chats=20, per_chat=3, archived=None, brief=False)`
 Everything unread, grouped by chat, with the latest incoming messages. Every
 chat is marked as archived or not. By default it looks at **both** folders.
 
@@ -318,7 +326,7 @@ On a live account: 147 chats with the debt on you, 115 with the debt on the
 other side, the oldest one hanging for 39,455 hours (since February 2022). Out
 of 323 dialogs, 48 channels, 12 bots and Saved Messages were filtered out.
 
-### `tg_history(chat, limit=40, before_id=None, from_user=None, search=None, topic=None, saved_from=None, brief=False)`
+### `tg_history(chat, limit=20, before_id=None, from_user=None, search=None, topic=None, saved_from=None, brief=False)`
 One chat's conversation, oldest to newest. `before_id` pages deeper, `topic`
 reads a single forum thread (the id comes from `tg_topics`).
 

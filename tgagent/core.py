@@ -1006,7 +1006,7 @@ class TelegramService:
         return result
 
     async def unread_summary(
-        self, limit_chats: int = 20, per_chat: int = 5, archived: bool | None = None
+        self, limit_chats: int = 20, per_chat: int = 3, archived: bool | None = None
     ) -> list[dict]:
         """By default looks at both the main list and the archive — unread matters
         everywhere."""
@@ -1112,7 +1112,7 @@ class TelegramService:
     async def history(
         self,
         chat: Any,
-        limit: int = 40,
+        limit: int = 20,
         before_id: int | None = None,
         from_user: Any = None,
         search: str | None = None,

@@ -25,8 +25,8 @@ the code talks to Telegram. Everything else is transport and scaffolding:
 | File | Lines | Role |
 |---|---|---|
 | **`tgagent/core.py`** | 5280 | **core: all account operations, chat resolution, limits** |
-| `tgagent/daemon.py` | 2114 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
-| `tgagent/mcp_server.py` | 1623 | 79 tools, each one a single call to the daemon |
+| `tgagent/daemon.py` | 2163 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
+| `tgagent/mcp_server.py` | 1663 | 79 tools, each one a single call to the daemon |
 | `tgagent/index.py` | 670 | local index of the correspondence: sqlite + FTS5, Russian morphology |
 | `tgagent/memory.py` | 234 | chat dossiers: file format, prompt, language-model call |
 | `tgagent/cli.py` | 712 | setup, sign-in, daemon control |
@@ -259,6 +259,14 @@ that, none of which changed what a single tool does:
   registration. Validation is unaffected: it runs against the function's own
   model, so an explicit null still goes through, and an argument where null
   *means* something (`tg_dialogs(archived=None)` — both lists) keeps its union.
+- **A chat row was mostly defaults.** A list of chats is the widest table here
+  and the emptiest: thirty rows of twelve keys, of which `pinned`, `archived`,
+  `mentions`, `unread`, `username`, `members` and `last_text` are usually false,
+  zero, null or empty. Key names alone were 37% of that answer. `lean_dialogs`
+  drops the keys that only restate the default and the `link`, which is
+  `https://t.me/` plus the username standing in the same row — a quarter off the
+  call, with nothing to reconstruct. It lives in the MCP layer and not in
+  `dialog_row`, because the daemon reads those same rows by key.
 - **Urls were being repeated.** The link preview card is generated from a link in
   the message, so its url is nearly always one the reader already has; a bare url
   in `links` is by construction a substring of the text alongside it. Both are
@@ -267,8 +275,11 @@ that, none of which changed what a single tool does:
   answer. What the card genuinely adds — title, site, description, read off the
   page — always stays.
 
-Together that is a little under two thirds off a fixed walk of ten reading calls,
-and about a third off the tool listing. `tests/test_mcp_payload.py` holds each of
+Measured side by side on the same account — the code before and the code after,
+each with its own daemon, minutes apart — a fixed walk of ten reading calls went
+from 135 266 tokens to 46 772, and the tool listing from 20 442 to 11 699. The
+doubling was visible in the raw numbers: before the fix the text half and the
+structured half of every answer matched to within six tokens. `tests/test_mcp_payload.py` holds each of
 them, because every one of these was invisible while it was happening: nothing
 failed, nothing looked wrong, and the bill was the only symptom.
 
@@ -296,6 +307,15 @@ longest were rewritten tighter without losing a fact, and going further would be
 trading correct tool choice for tokens. The answers are paid per call and scale
 with what was asked for: `limit` and `brief` are the levers, and most of what
 remains in a large answer is message text, which is the thing that was wanted.
+
+Which is also where this stops. Measured on real payloads, the ideas that are
+left buy 2-6%: a shorter date format costs readability for 4%, dropping `from_id`
+where `from` is already there saves 3-6%, and the repeated boilerplate across all
+79 tool descriptions comes to 271 tokens in total — there is no padding left to
+find. What did buy something was asking for less by default: `tg_history` reads
+twenty messages instead of forty and `tg_unread` three per chat instead of five,
+both of them numbers the caller can raise in the same call. Everything else in a
+big answer is text somebody asked to read.
 
 ## Invariants that must not be broken
 
