@@ -159,6 +159,14 @@ class FakeService:
     async def is_premium(self) -> bool:
         return self.premium
 
+    async def ensure_connected(self) -> bool:
+        """Healthy by default; a test that wants an outage sets `dead` to True."""
+        if getattr(self, "dead", False):
+            self.calls.append(("ensure_connected", {}))
+            self.dead = False
+            return True
+        return False
+
     async def limits(self, full: bool = False) -> dict:
         """Exactly the shape read by caps.build and by the per-account digest."""
         self.calls.append(("limits", {"full": full}))

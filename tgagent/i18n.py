@@ -458,6 +458,18 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "The agent is connected to Telegram. /help — what I can do.",
         "ru": "Агент подключён к Telegram. /help — что умею.",
     },
+    "daemon.offline": {
+        "en": ("Lost the connection to Telegram on account {account} and cannot get "
+               "it back: {error}. I keep trying; nothing is being read or sent "
+               "meanwhile."),
+        "ru": ("Потерял связь с Telegram на аккаунте {account} и не могу "
+               "восстановить: {error}. Продолжаю пытаться; пока ничего не читается "
+               "и не отправляется."),
+    },
+    "daemon.reconnected": {
+        "en": "The connection to Telegram on account {account} is back.",
+        "ru": "Связь с Telegram на аккаунте {account} восстановлена.",
+    },
     "daemon.no_sessions": {
         "en": "There is no Telegram session at all.",
         "ru": "Нет ни одной сессии Telegram.",

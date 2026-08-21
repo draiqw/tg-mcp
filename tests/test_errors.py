@@ -352,6 +352,9 @@ async def call_daemon(daemon, monkeypatch, exc: Exception) -> dict:
     class Svc:
         account = "main"
 
+        async def ensure_connected(self) -> bool:
+            return False
+
     monkeypatch.setattr(daemon, "service", lambda account=None: Svc())
     monkeypatch.setattr(daemon, "dispatch_table", lambda svc: {"react": boom})
     resp = await daemon.handle_call(
@@ -397,6 +400,9 @@ async def test_brief_never_reaches_a_core_method(daemon, monkeypatch):
 
     class Svc:
         account = "main"
+
+        async def ensure_connected(self) -> bool:
+            return False
 
     monkeypatch.setattr(daemon, "service", lambda account=None: Svc())
     monkeypatch.setattr(daemon, "dispatch_table", lambda svc: {"history": spy})

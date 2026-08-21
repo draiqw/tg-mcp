@@ -592,9 +592,11 @@ class TelegramService:
             str(config.session_path(self.account)),
             api_id,
             api_hash,
-            **config.client_info(),
+            **config.client_options(),
         )
         self.guard = TelegramService._shared_guard
+        # One reconnect at a time per account: see ensure_connected.
+        self._reconnect_lock = asyncio.Lock()
         self.me = None
         self._dialog_cache: list[dict[str, Any]] = []
         self._dialog_cache_at = 0.0
@@ -625,6 +627,43 @@ class TelegramService:
 
     async def stop(self) -> None:
         await self.client.disconnect()
+
+    async def ensure_connected(self) -> bool:
+        """Bring the client back if Telethon has given the connection up for dead.
+
+        Telethon retries a broken connection a fixed number of times and then stops
+        for good: `_reconnect` runs out of attempts, calls `_disconnect`, and from
+        then on every request raises ConnectionError without touching the network.
+        Nothing in the library ever tries again. For a daemon meant to sit there for
+        weeks that is the difference between a bad minute and a dead agent, and the
+        symptom is silent — the process is up, the socket answers, every call fails.
+
+        Reconnecting costs one round trip and is skipped when the client is fine, so
+        this can sit on the path of every call. The lock is what keeps a burst of
+        concurrent calls from opening a burst of connections: the losers wait for
+        the winner and then see a live client.
+
+        Returns True when it actually had to heal something, so the caller can say
+        so out loud instead of hiding a real outage.
+        """
+        if self.client.is_connected():
+            return False
+        async with self._reconnect_lock:
+            # Checked again inside the lock: by the time this task got in, the task
+            # that held the lock may already have done the work.
+            if self.client.is_connected():
+                return False
+            await self.client.connect()
+            if not await self.client.is_user_authorized():
+                # The connection is back but the session is not valid any more —
+                # revoked from another device, or expired. Reconnecting forever
+                # would not fix that, and pretending it is fine would hand the
+                # agent an account it no longer has.
+                raise config.SetupError(
+                    f"The session of account {self.account!r} is no longer "
+                    f"authorised. Run `{config.login_command(self.account)}`."
+                )
+            return True
 
     def _remember_premium(self) -> None:
         """Remember the subscription flag from the profile already read."""

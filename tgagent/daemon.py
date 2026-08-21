@@ -39,6 +39,13 @@ DIGEST_TICK_SEC = 30
 # A dossier is refreshed less often: it is a call to a language model, not a
 # local check.
 MEMORY_TICK_SEC = 60
+# How often the daemon checks that its connection to Telegram is still alive.
+# Nothing polls the network here: is_connected() reads a flag, and the call that
+# follows it only happens when that flag says the connection is dead. Fifteen
+# seconds is chosen against what the daemon does while nobody is calling it —
+# it listens. A dead connection delivers no incoming messages, so an alert rule
+# that should have fired stays silent, and no error appears anywhere.
+HEALTH_TICK_SEC = 15
 # The daemon was down longer — a "since morning" digest arriving in the evening
 # is not a digest any more but junk: the slot is marked passed and nothing is
 # sent.
@@ -69,6 +76,9 @@ class Daemon:
         self.last_alert: dict[tuple[str, int], float] = {}
         self.alert_count = 0
         self.paused = False
+        # Accounts the daemon has already complained about, so that a connection
+        # that flaps is reported once per outage rather than once per tick.
+        self._offline: dict[str, bool] = {}
         # Who is waiting for an incoming message (tg_wait) and for an answer from
         # the owner (tg_ask) right now.
         self.waiters: list[tuple[dict, asyncio.Future]] = []
@@ -1004,6 +1014,46 @@ class Daemon:
                 )
                 log(f"memory: failed to update {chat_id}: {type(exc).__name__}: {exc}")
 
+    async def health_loop(self) -> None:
+        """Reconnect accounts that Telethon has written off.
+
+        This exists because the failure is silent. When the library exhausts its
+        reconnection attempts the process stays up, the socket keeps answering and
+        every call returns the same ConnectionError; incoming messages simply stop.
+        Nothing in the daemon noticed until somebody made a call and read the error
+        by hand — which is how it was found: `tg daemon restart` fixed it, and that
+        is not a thing an agent that is supposed to be watching should need.
+
+        The owner is told once per outage, not once per tick: a connection that
+        flaps would otherwise turn the alert chat into the log.
+        """
+        while True:
+            await asyncio.sleep(HEALTH_TICK_SEC)
+            for label, svc in list(self.services.items()):
+                try:
+                    if await svc.ensure_connected():
+                        log(f"telegram[{label}]: connection was dead, reconnected")
+                        if self._offline.pop(label, False):
+                            await self.notify_owner(
+                                t("daemon.reconnected", account=label))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if not self._offline.get(label):
+                        self._offline[label] = True
+                        log(f"telegram[{label}]: cannot reconnect: {exc}")
+                        await self.notify_owner(
+                            t("daemon.offline", account=label, error=str(exc)))
+
+    async def notify_owner(self, text: str) -> None:
+        """Say it through the bot, and never let saying it break the caller."""
+        if not self.bot.configured:
+            return
+        try:
+            await self.bot.send(text)
+        except Exception as exc:
+            log(f"bot: could not deliver a health notice: {exc}")
+
     async def memory_loop(self) -> None:
         """A separate tick, because an update is a network call to the model.
 
@@ -1850,6 +1900,12 @@ class Daemon:
             )
         token = BRIEF.set(brief)
         try:
+            # Before the method, not inside it: a call that arrives during an
+            # outage should wait out one reconnect rather than come back with a
+            # ConnectionError the agent can do nothing sensible with. Costs
+            # nothing when the connection is healthy.
+            if await svc.ensure_connected():
+                log(f"telegram[{svc.account}]: reconnected on an incoming {method}")
             if method in WRITE_METHODS:
                 # We ask before the call, not inside the core: a refusal must stay an
                 # error of the call and land in actions.jsonl by the same path as a
@@ -1947,6 +2003,7 @@ class Daemon:
         reminder_task = asyncio.create_task(self.reminder_loop())
         digest_task = asyncio.create_task(self.digest_loop())
         memory_task = asyncio.create_task(self.memory_loop())
+        health_task = asyncio.create_task(self.health_loop())
         if self.bot.configured:
             try:
                 await self.bot.send(t("daemon.connected"))
@@ -1966,6 +2023,7 @@ class Daemon:
             reminder_task.cancel()
             digest_task.cancel()
             memory_task.cancel()
+            health_task.cancel()
             await self.bot.close()
             await runner.cleanup()
             for svc in self.services.values():

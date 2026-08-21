@@ -32,7 +32,7 @@ below.
 
 | What you see | What is happening | What to do |
 |---|---|---|
-| `ConnectionError: Cannot send requests while disconnected` | the daemon is alive and answers over RPC, but its Telethon client dropped off the network (machine sleep, network change, disconnect). `tg status` and `tg doctor` are green meanwhile | `uv run tg daemon restart` |
+| `ConnectionError: Cannot send requests while disconnected` | the daemon is alive and answers over RPC, but its Telethon client dropped off the network (machine sleep, network change, a transport-level flood). `tg status` and `tg doctor` are green meanwhile | should heal itself within 15 seconds and say so in the log; if it does not, the reconnection is failing too — look for `cannot reconnect` in `data/daemon.log` |
 | `The Telegram agent is not set up yet, so the tools do not work` | no keys or no session at all — the installation was not finished | `uv run tg init`; the sign-in is still done by the owner by hand |
 | `The Telegram daemon does not answer` | the daemon is not up | `uv run tg daemon start`, then `uv run tg daemon logs`; in docker — `docker compose up -d` |
 | `Connection refused` with `data/daemon.sock` present | the daemon died, the socket file stayed | `uv run tg daemon restart` |

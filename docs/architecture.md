@@ -24,17 +24,17 @@ the code talks to Telegram. Everything else is transport and scaffolding:
 
 | File | Lines | Role |
 |---|---|---|
-| **`tgagent/core.py`** | 5241 | **core: all account operations, chat resolution, limits** |
-| `tgagent/daemon.py` | 2056 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
+| **`tgagent/core.py`** | 5280 | **core: all account operations, chat resolution, limits** |
+| `tgagent/daemon.py` | 2114 | owner of all sessions, RPC over a unix socket, watcher, filters, digest, waiting, reminders, bot channel |
 | `tgagent/mcp_server.py` | 1623 | 79 tools, each one a single call to the daemon |
 | `tgagent/index.py` | 670 | local index of the correspondence: sqlite + FTS5, Russian morphology |
 | `tgagent/memory.py` | 234 | chat dossiers: file format, prompt, language-model call |
 | `tgagent/cli.py` | 712 | setup, sign-in, daemon control |
 | `tgagent/install.py` | 1053 | the `tg init` wizard and the `tg doctor` diagnostics: installation state, steps, registration in the client |
-| `tgagent/config.py` | 512 | paths, `.env`, rules, limits |
+| `tgagent/config.py` | 538 | paths, `.env`, rules, limits |
 | `tgagent/capabilities.py` | 766 | tables of "what a given tool needs", checks of the local setup, summary text, translation of Telegram errors |
 | `tgagent/alerts.py` | 137 | Bot API: alerts, commands, buttons under the agent's questions |
-| `tgagent/i18n.py` | 1877 | language catalog: owner-facing texts in `en` and `ru`, chosen by `TG_LANG` |
+| `tgagent/i18n.py` | 1889 | language catalog: owner-facing texts in `en` and `ru`, chosen by `TG_LANG` |
 
 The rule is simple: a new capability goes into `core.py` as a `TelegramService`
 method, gets registered in the daemon's `dispatch_table()` and is wrapped by a
@@ -115,6 +115,41 @@ and it does not show up in `lsof -i` or in port scans.
 The second consequence: the daemon lives permanently, which means it has a place to
 keep the inbox watcher. The MCP server starts and dies together with the client, a
 watcher cannot live like that.
+
+## Staying connected
+
+A daemon that lives for weeks outlives its connection to Telegram, and Telethon's
+own answer to that runs out. On a broken connection the library retries a fixed
+number of times and then calls `_disconnect`; from that moment every request
+raises `ConnectionError: Cannot send requests while disconnected` without going
+near the network, and nothing ever tries again. The process is still up, the
+socket still answers, incoming messages simply stop. That is the worst shape a
+failure can take here: an agent that is supposed to be watching a chat is not
+watching it, and says nothing.
+
+It has happened twice in practice, both times after a transport-level flood
+(`HTTP code 429`) rather than a plain outage, and both times the cure was
+`tg daemon restart`.
+
+Three things answer it, and each covers what the others do not:
+
+- `config.client_options()` widens Telethon's own window — 20 attempts, 3 seconds
+  apart, instead of 5 and 1. Short blips never reach our code at all.
+- `TelegramService.ensure_connected()` reconnects a client that has been written
+  off. It reads a flag when the connection is healthy, so it is cheap enough to
+  sit on the path of every call, and it holds a per-account lock so that a burst
+  of calls arriving during an outage opens one connection rather than ten — a
+  stampede is how an account that was merely offline earns the flood error that
+  keeps it offline.
+- `Daemon.health_loop()` runs the same check every 15 seconds whether anyone is
+  calling or not, because the daemon's other job is listening, and a dead
+  connection delivers no messages to notice. The owner is told through the bot
+  once per outage, not once per tick, and told again when it comes back.
+
+No finite number of retries covers an outage of unknown length, which is why the
+loop exists and why it never gives up. A session revoked from another device is
+the one thing it does not retry: the connection comes back and the account does
+not, and that is the owner's business.
 
 ## Data flow
 

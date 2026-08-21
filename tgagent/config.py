@@ -6,6 +6,7 @@ import json
 import os
 import platform
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -192,6 +193,31 @@ def client_info() -> dict[str, str]:
         "device_model": "claude-tg-agent",
         "system_version": f"{system} {release}".strip(),
         "app_version": f"tgagent {__version__}",
+    }
+
+
+# How long Telethon keeps trying by itself before it gives the connection up for
+# dead. The library's default is five attempts a second apart, and that window is
+# too narrow for what actually happens to a long-lived daemon: a transport-level
+# 429, or a laptop lid closed over lunch. When the window runs out Telethon does
+# not go quiet — it marks the sender disconnected for good, and every later call
+# raises "Cannot send requests while disconnected" until the process restarts.
+# Widening it here is the cheap half of the answer; the daemon's health loop is
+# the other half, because no finite number of retries covers an outage of
+# unknown length.
+CONNECT_RETRIES = 20
+RETRY_DELAY = 3
+
+
+def client_options() -> dict[str, Any]:
+    """Everything the long-lived client is built with: signature plus persistence."""
+    return {
+        **client_info(),
+        "connection_retries": CONNECT_RETRIES,
+        "retry_delay": RETRY_DELAY,
+        # A request in flight when the connection breaks is retried once the
+        # connection is back, instead of failing the agent's call.
+        "request_retries": CONNECT_RETRIES,
     }
 
 
